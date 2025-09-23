@@ -1,25 +1,21 @@
-// invoiceService.js
 import PDFDocument from "pdfkit";
 import nodemailer from "nodemailer";
 import fs from "fs";
 import path from "path";
-import dotenv from "dotenv";
-dotenv.config({
-    path:"../.env"
-})
+import 'dotenv/config';
+
 const createEmailTransporter = () => {
   return nodemailer.createTransport({
-    host: "smtp.gmail.com", // or smtp.yourprovider.com
-    port: 587, // or 465 for secure
-    secure: false, // true for port 465
+    host: "smtp.gmail.com",
+    port: 587, 
+    secure: false, 
     auth: {
-      user: process.env.EMAIL_USER || `info.vegbazar@gmail.com`, // your email
-      pass: process.env.EMAIL_PASS || `lrtx wqdu gopd ujiv`, // your password or app password
+      user: process.env.MAILER_MAIL, 
+      pass: process.env.MAILER_PASSWORD, 
     },
   });
 };
 
-// Generate Invoice PDF
 export const generateInvoicePDF = async (order) => {
   return new Promise((resolve, reject) => {
     try {

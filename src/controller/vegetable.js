@@ -3,13 +3,13 @@ import { ApiResponse } from "../utility/ApiRespoense.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { uploadToCloudinary } from "../utility/cloudinary.js";
 
-// Get all vegetables
+
 export const getVegetables = asyncHandler(async (req, res) => {
   const vegetables = await Vegetable.find();
   res.json(new ApiResponse(200, vegetables, "Vegetables fetched successfully"));
 });
 
-// Get vegetable by ID
+
 export const getVegetableById = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const vegetable = await Vegetable.findById(id);
@@ -21,7 +21,7 @@ export const getVegetableById = asyncHandler(async (req, res) => {
   res.json(new ApiResponse(200, vegetable, "Vegetable fetched successfully"));
 });
 
-// Add Vegetable
+
 export const addVegetable = asyncHandler(async (req, res) => {
   const { screenNumber, price, offer, description, stockKg, image, name } =
     req.body;

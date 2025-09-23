@@ -1,6 +1,5 @@
 import City from "../Model/City.js";
 
-// ➝ Add a new city with areas
 export const addCity = async (req, res) => {
   try {
     const { name, areas } = req.body;
@@ -26,7 +25,6 @@ export const addCity = async (req, res) => {
   }
 };
 
-// ➝ Get all cities
 export const getCities = async (req, res) => {
   try {
     const cities = await City.find().sort({ createdAt: -1 });
@@ -36,7 +34,6 @@ export const getCities = async (req, res) => {
   }
 };
 
-// ➝ Delete a city
 export const deleteCity = async (req, res) => {
   try {
     const { id } = req.params;
@@ -52,7 +49,6 @@ export const deleteCity = async (req, res) => {
   }
 };
 
-// ➝ Update a city (name or areas)
 export const updateCity = async (req, res) => {
   try {
     const { id } = req.params;

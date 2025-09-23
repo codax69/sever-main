@@ -1,32 +1,29 @@
 import nodemailer from "nodemailer";
-import crypto from "crypto";
+import 'dotenv/config';
 
-// Configure nodemailer transporter - FIXED: createTransport (not createTransporter)
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com", // or smtp.yourprovider.com
-  port: 587, // or 465 for secure
-  secure: false, // true for port 465
+  host: "smtp.gmail.com", 
+  port: 587,
+  secure: false, 
   auth: {
-    user: process.env.EMAIL_USER || `info.vegbazar@gmail.com`, // your email
-    pass: process.env.EMAIL_PASS || `lrtx wqdu gopd ujiv`, // your password or app password
+    user: process.env.MAILER_MAIL ,
+    pass: process.env.MAILER_PASSWORD ,
   },
 });
-console.log(process.env.EMAIL_USER, process.env.DB_URI);
 
-// In-memory storage for OTPs (use Redis/database in production)
 const otpStorage = new Map();
 
-// Generate 6-digit OTP
+
 const generateOTP = () => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-// Send OTP Controller
+
 export const sendOtp = async (req, res) => {
   try {
     const { email } = req.body;
 
-    // Validate email
+
     if (!email) {
       return res.status(400).json({
         success: false,
@@ -34,7 +31,7 @@ export const sendOtp = async (req, res) => {
       });
     }
 
-    // Email validation regex
+
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({
@@ -43,11 +40,10 @@ export const sendOtp = async (req, res) => {
       });
     }
 
-    // Generate OTP
+
     const otp = generateOTP();
     const expiryTime = Date.now() + 10 * 60 * 1000; // 10 minutes from now
 
-    // Store OTP with expiry
     otpStorage.set(email, {
       otp: otp,
       expiresAt: expiryTime,
@@ -55,7 +51,7 @@ export const sendOtp = async (req, res) => {
       lastSent: Date.now(),
     });
 
-    // Email content
+
     const mailOptions = {
       from: process.env.EMAIL_USER,
       to: email,
