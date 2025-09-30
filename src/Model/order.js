@@ -6,7 +6,23 @@ const orderSchema = new mongoose.Schema({
   selectedVegetables: [{ type: Object, required: true }], // Can be replaced with references to Vegetable model
   orderDate: { type: Date, required: true },
   totalAmount: { type: Number, required: true },
-  orderId: { type: String, required: true, unique: true }
+  orderId: { type: String, required: true, unique: true },
+  paymentMethod: {
+    type: String,
+    enum: ["COD", "ONLINE"],
+    required: true,
+  },
+  paymentStatus: {
+    type: String,
+    enum: ["pending", "awaiting_payment", "completed", "failed"],
+    default: "pending",
+  },
+  razorpayPaymentId: {
+    type: String,
+  },
+  razorpayOrderId: {
+    type: String,
+  },
 });
 
 const Order = mongoose.model("Order", orderSchema);

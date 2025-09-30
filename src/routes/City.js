@@ -13,6 +13,6 @@ const router = Router();
 router.get("/", getCities);
 router.post("/add", adminMiddleware, addCity);
 router.delete("/:id", adminMiddleware, deleteCity);
-router.put("/:id", adminMiddleware, updateCity);
+router.patch("/:id", adminMiddleware, updateCity);
 
 export default router;

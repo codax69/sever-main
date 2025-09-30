@@ -2,34 +2,40 @@ import jwt from "jsonwebtoken";
 
 const adminMiddleware = (req, res, next) => {
   try {
-    // Get token from header
+    // Get token from cookies or Authorization header
     const token =
-      req.cookies?.token ||
+      req.cookies?.accessToken ||
       req.header("Authorization")?.replace("Bearer ", "").trim();
 
-      console.log(token)
-
     if (!token) {
-      return res
-        .status(401)
-        .json({ message: "No token, authorization denied" });
+      return res.status(401).json({ message: "No token, authorization denied" });
     }
+    
 
-    // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    // Verify access token
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_SECRET
+    );
 
-    // Check if user has admin role
+    // Role check (only admin allowed)
     if (decoded.role !== "admin") {
       return res
         .status(403)
         .json({ message: "Access denied. Admin rights required" });
     }
 
-    // Add user from payload
+    // Attach user to request
     req.user = decoded;
     next();
   } catch (error) {
-    res.status(401).json({ message: "Token is not valid" });
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ message: "Token expired, please login again" });
+    }
+    if (error.name === "JsonWebTokenError") {
+      return res.status(401).json({ message: "Invalid token" });
+    }
+    res.status(401).json({ message: "Authentication failed" });
   }
 };
 

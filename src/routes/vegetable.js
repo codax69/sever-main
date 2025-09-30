@@ -17,6 +17,12 @@ router.get("/:id", getVegetableById);
 // Protected routes - only admin can access
 router.post(
   "/add",
+  addVegetable
+);
+router.delete("/:id", deleteVegetable);
+router.patch("/:id" , updateVegetable);
+router.post(
+  "/add",
   adminMiddleware,
   addVegetable
 );

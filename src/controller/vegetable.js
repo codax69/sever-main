@@ -25,7 +25,6 @@ export const getVegetableById = asyncHandler(async (req, res) => {
 export const addVegetable = asyncHandler(async (req, res) => {
   const { screenNumber, price, offer, description, stockKg, image, name } =
     req.body;
-  console.log({ name, image, price, stockKg, screenNumber });
   if (!name || !price || !stockKg) {
     return res
       .status(400)
@@ -59,14 +58,55 @@ export const deleteVegetable = asyncHandler(async (req, res) => {
 // Update Vegetable
 export const updateVegetable = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const updateData = req.body;
-  const vegetable = await Vegetable.findByIdAndUpdate(id, updateData, {
-    new: true,
-  });
-  if (!vegetable) {
+  const { price, stockKg,image } = req.body;
+  if (price === undefined && stockKg === undefined && image===undefined) {
     return res
-      .status(404)
-      .json(new ApiResponse(404, null, "Vegetable not found"));
+      .status(400)
+      .json(new ApiResponse(400, null, "At least one field (price or stockKg) is required"));
   }
-  res.json(new ApiResponse(200, vegetable, "Vegetable updated successfully"));
+  if (price !== undefined && (isNaN(price) || price < 0)) {
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Price must be a valid positive number"));
+  }
+
+  if (stockKg !== undefined && (isNaN(stockKg) || stockKg < 0)) {
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Stock must be a valid positive number"));
+  }
+  
+  const updateData = {};
+  if (price !== undefined) updateData.price = parseFloat(price);
+  if (stockKg !== undefined) updateData.stockKg = parseFloat(stockKg);
+  if(image!==undefined){updateData.image=image}
+  try {
+    const vegetable = await Vegetable.findByIdAndUpdate(id, updateData, {
+      new: true, 
+      runValidators: true, 
+    });
+
+    if (!vegetable) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Vegetable not found"));
+    }
+
+    res.json(new ApiResponse(200, vegetable, "Vegetable updated successfully"));
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid vegetable ID format"));
+    }
+    
+   
+    if (error.name === 'ValidationError') {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, error.message));
+    }
+
+    throw error;
+  }
 });
