@@ -7,7 +7,7 @@ import { ApiResponse } from "../utility/ApiRespoense.js";
 const cookieOptions = {
   httpOnly: true,
   secure: true,
-  sameSite: "strict",
+  sameSite: "lax",
 };
 
 const accessTokenOptions = {
