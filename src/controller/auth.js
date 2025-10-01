@@ -5,9 +5,8 @@ import { asyncHandler } from "../utility/AsyncHandler.js";
 import { ApiResponse } from "../utility/ApiRespoense.js";
 
 const cookieOptions = {
-  httpOnly: true,
   secure: true,
-  sameSite: "lax",
+  sameSite: "none",
 };
 
 const accessTokenOptions = {
