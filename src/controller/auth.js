@@ -6,6 +6,7 @@ import { ApiResponse } from "../utility/ApiRespoense.js";
 
 const cookieOptions = {
   secure: true,
+  httpOnly: true,
   sameSite: "none",
 };
 
