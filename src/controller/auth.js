@@ -1,8 +1,9 @@
 import User from "../Model/user.js";
 import jwt from "jsonwebtoken";
-import crypto from "crypto";
+import crypto, { verify } from "crypto";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { ApiResponse } from "../utility/ApiRespoense.js";
+import "dotenv/config"
 
 const cookieOptions = {
   secure: true,
@@ -308,3 +309,23 @@ export const logoutAllDevices = async (req, res) => {
     });
   }
 };
+export  const verifyCaptcha = asyncHandler(async (req, res, next) => {
+  const { value } = req.body; // this should be the captcha token from frontend
+  const secretKey = process.env.RECAPTCHA_SECRET_KEY;
+
+  if (!value) {
+    return res.status(400).json({ success: false, message: "Captcha token missing" });
+  }
+
+  const response = await fetch(
+    `https://www.google.com/recaptcha/api/siteverify?secret=${secretKey}&response=${value}`,
+    { method: "POST" }
+  );
+
+  const data = await response.json();
+
+  if (!data.success) {
+    return res.status(400).json({ success: false, message: "Captcha verification failed" });
+  }
+  
+});
