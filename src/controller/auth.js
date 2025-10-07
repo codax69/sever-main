@@ -309,23 +309,48 @@ export const logoutAllDevices = async (req, res) => {
     });
   }
 };
-export  const verifyCaptcha = asyncHandler(async (req, res, next) => {
-  const { value } = req.body; // this should be the captcha token from frontend
+export const verifyCaptcha = asyncHandler(async (req, res, next) => {
+  const { token, action } = req.body; // token sent from frontend reCAPTCHA v3
   const secretKey = process.env.RECAPTCHA_SECRET_KEY;
 
-  if (!value) {
+  if (!token) {
     return res.status(400).json({ success: false, message: "Captcha token missing" });
   }
 
-  const response = await fetch(
-    `https://www.google.com/recaptcha/api/siteverify?secret=${secretKey}&response=${value}`,
-    { method: "POST" }
-  );
+  const response = await fetch("https://www.google.com/recaptcha/api/siteverify", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      secret: secretKey,
+      response: token,
+    }),
+  });
 
   const data = await response.json();
 
   if (!data.success) {
-    return res.status(400).json({ success: false, message: "Captcha verification failed" });
+    return res.status(400).json({
+      success: false,
+      message: "Captcha verification failed",
+      error_codes: data["error-codes"],
+    });
   }
   
+  const threshold = 0.5;
+  if (data.score < threshold) {
+    return res.status(403).json({
+      success: false,
+      message: "Low reCAPTCHA score - possible bot",
+      score: data.score,
+    });
+  }
+
+  // Optional: verify action matches expected
+  if (action && data.action && data.action !== action) {
+    return res.status(400).json({
+      success: false,
+      message: "Captcha action mismatch",
+    });
+  }
+  next();
 });
