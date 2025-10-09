@@ -7,6 +7,6 @@ const router = Router();
 router.post('/register', register);
 router.post('/login', login);
 router.get('/get-user', adminMiddleware,getCurrentUser);
-router.post("/recaptcha",verifyCaptcha)
+router.post("/verify-captcha",verifyCaptcha)
 
 export default router;
