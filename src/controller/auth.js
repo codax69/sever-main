@@ -310,7 +310,11 @@ export const logoutAllDevices = async (req, res) => {
   }
 };
 export const verifyCaptcha = asyncHandler(async (req, res, next) => {
-  const { token, action } = req.body; // token sent from frontend reCAPTCHA v3
+  const { token, action } = req.body; 
+  if(token==="undefined" || token===null){
+    res.status(400).json({ success: false, message: "Captcha token missing" });
+    return; 
+  }
   const secretKey = process.env.RECAPTCHA_SECRET_KEY;
 
   if (!token) {
