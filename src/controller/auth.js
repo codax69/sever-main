@@ -4,11 +4,13 @@ import crypto, { verify } from "crypto";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
 import "dotenv/config"
+import { Domain } from "domain";
 
 const cookieOptions = {
   secure: true,
   httpOnly: true,
   sameSite: "none",
+  Domain:"admin.vegbazar.cloud"
 };
 
 const accessTokenOptions = {

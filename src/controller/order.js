@@ -146,7 +146,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     selectedOffer,
     selectedVegetables,
     orderDate: new Date(),
-    totalAmount: selectedOffer.price + DELIVERY_CHARGES,
+    totalAmount: selectedOffer.price + 20,
     orderId,
     paymentMethod: "ONLINE",
     paymentStatus: "completed",
