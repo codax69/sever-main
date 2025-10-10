@@ -5,6 +5,7 @@ import Razorpay from "razorpay";
 import "dotenv/config";
 import crypto from "crypto";
 import {DELIVERY_CHARGES} from "../../const.js";
+
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_SECRET,
@@ -20,9 +21,11 @@ export const getOrders = asyncHandler(async (req, res) => {
 export const getOrderById = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const order = await Order.findById(id);
+  
   if (!order) {
     return res.status(404).json(new ApiResponse(404, null, "Order not found"));
   }
+  
   res.json(new ApiResponse(200, order, "Order fetched successfully"));
 });
 
@@ -37,16 +40,16 @@ export const addOrder = asyncHandler(async (req, res) => {
   } = req.body;
 
   if (!customerInfo?.name || !customerInfo?.mobile)
-    return res.status(400).json({ message: "Customer info required" });
+    return res.status(400).json(new ApiResponse(400, null, "Customer info required"));
 
   if (!selectedOffer?.title || !selectedOffer?.price)
-    return res.status(400).json({ message: "Valid offer required" });
+    return res.status(400).json(new ApiResponse(400, null, "Valid offer required"));
 
   if (!Array.isArray(selectedVegetables) || selectedVegetables.length === 0)
-    return res.status(400).json({ message: "At least one vegetable required" });
+    return res.status(400).json(new ApiResponse(400, null, "At least one vegetable required"));
 
   if (!orderId)
-    return res.status(400).json({ message: "Order ID is required" });
+    return res.status(400).json(new ApiResponse(400, null, "Order ID is required"));
 
   try {
     if (paymentMethod === "COD") {
@@ -55,7 +58,7 @@ export const addOrder = asyncHandler(async (req, res) => {
         selectedOffer,
         selectedVegetables,
         orderDate: new Date(),
-        totalAmount: selectedOffer.price ,
+        totalAmount: selectedOffer.price,
         orderId,
         paymentMethod,
         paymentStatus: "pending",
@@ -95,7 +98,7 @@ export const addOrder = asyncHandler(async (req, res) => {
   }
 });
 
-// Verify Razorpay payment & save order after success
+// Verify payment and save order
 export const verifyPayment = asyncHandler(async (req, res) => {
   const {
     razorpay_order_id,
@@ -111,6 +114,19 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Missing payment data"));
+
+  // Validate order data
+  if (!customerInfo?.name || !customerInfo?.mobile)
+    return res.status(400).json(new ApiResponse(400, null, "Customer info required"));
+
+  if (!selectedOffer?.title || !selectedOffer?.price)
+    return res.status(400).json(new ApiResponse(400, null, "Valid offer required"));
+
+  if (!Array.isArray(selectedVegetables) || selectedVegetables.length === 0)
+    return res.status(400).json(new ApiResponse(400, null, "At least one vegetable required"));
+
+  if (!orderId)
+    return res.status(400).json(new ApiResponse(400, null, "Order ID is required"));
 
   const body = razorpay_order_id + "|" + razorpay_payment_id;
   const expectedSignature = crypto
@@ -130,7 +146,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     selectedOffer,
     selectedVegetables,
     orderDate: new Date(),
-    totalAmount: selectedOffer.price,
+    totalAmount: selectedOffer.price + DELIVERY_CHARGES,
     orderId,
     paymentMethod: "ONLINE",
     paymentStatus: "completed",
