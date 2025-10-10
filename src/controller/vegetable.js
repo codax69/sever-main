@@ -1,5 +1,5 @@
 import Vegetable from "../Model/vegetable.js";
-import { ApiResponse } from "../utility/ApiRespoense.js";
+import { ApiResponse } from "../utility/ApiResponse.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { uploadToCloudinary } from "../utility/cloudinary.js";
 

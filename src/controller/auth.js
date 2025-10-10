@@ -2,7 +2,7 @@ import User from "../Model/user.js";
 import jwt from "jsonwebtoken";
 import crypto, { verify } from "crypto";
 import { asyncHandler } from "../utility/AsyncHandler.js";
-import { ApiResponse } from "../utility/ApiRespoense.js";
+import { ApiResponse } from "../utility/ApiResponse.js";
 import "dotenv/config"
 
 const cookieOptions = {
@@ -309,52 +309,3 @@ export const logoutAllDevices = async (req, res) => {
     });
   }
 };
-export const verifyCaptcha = asyncHandler(async (req, res, next) => {
-  const { token, action } = req.body; 
-  if(token==="undefined" || token===null){
-    res.status(400).json({ success: false, message: "Captcha token missing" });
-    return; 
-  }
-  const secretKey = process.env.RECAPTCHA_SECRET_KEY;
-
-  if (!token) {
-    return res.status(400).json({ success: false, message: "Captcha token missing" });
-  }
-
-  const response = await fetch("https://www.google.com/recaptcha/api/siteverify", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      secret: secretKey,
-      response: token,
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!data.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Captcha verification failed",
-      error_codes: data["error-codes"],
-    });
-  }
-  
-  const threshold = 0.5;
-  if (data.score < threshold) {
-    return res.status(403).json({
-      success: false,
-      message: "Low reCAPTCHA score - possible bot",
-      score: data.score,
-    });
-  }
-
-  // Optional: verify action matches expected
-  if (action && data.action && data.action !== action) {
-    return res.status(400).json({
-      success: false,
-      message: "Captcha action mismatch",
-    });
-  }
-  next();
-});

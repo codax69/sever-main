@@ -1,7 +1,7 @@
 import Offer from "../Model/offer.js";
-import { ApiResponse } from "../utility/ApiRespoense.js";
+import { ApiResponse } from "../utility/ApiResponse.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
-import { ApiError } from "../utility/ApiErrorHandler.js";
+import { ApiError } from "../utility/ApiError.js";
 
 // Validation helper
 const validateOfferData = (data) => {
