@@ -6,7 +6,12 @@ const customerSchema = new mongoose.Schema({
   mobile: { type: String, required: true },
   address: { type: String, required: true },
   city: { type: String, required: true },
-  state: { type: String, required: true },
+  area: { type: String, required: true },
+  state: {
+    type: String,
+    required: false,
+    default: "Gujarat",
+  },
 });
 
 const Customer = mongoose.model("Customer", customerSchema);

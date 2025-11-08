@@ -239,17 +239,17 @@ export const processOrderInvoice = async (orderId) => {
       throw new Error("Order not found");
     }
 
-    console.log(`Processing invoice for order: ${orderId}`);
+    // console.log(`Processing invoice for order: ${orderId}`);
 
     // Generate PDF invoice
     const invoicePath = await generateInvoicePDF(order);
-    console.log(`Invoice PDF generated: ${invoicePath}`);
+    // console.log(`Invoice PDF generated: ${invoicePath}`);
 
     // Send email with invoice
     const emailResult = await sendInvoiceEmail(order, invoicePath);
-    console.log(
-      `Invoice email sent successfully to: ${order.customerInfo.email}`
-    );
+    // console.log(
+    //   `Invoice email sent successfully to: ${order.customerInfo.email}`
+    // );
 
     return {
       success: true,

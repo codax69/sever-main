@@ -53,7 +53,7 @@ export const updateCity = async (req, res) => {
   try {
     const { id } = req.params;
     const { name, areas } = req.body;
-
+    // console.log(areas)
     const updatedCity = await City.findByIdAndUpdate(
       id,
       { name, areas },
