@@ -387,14 +387,14 @@ export const addOrder = asyncHandler(async (req, res) => {
     paymentMethod,
     orderType,
   } = req.body;
-  console.log("Add Order Request Body:", {
-    customerInfo,
-    selectedOffer,
-    selectedVegetables,
-    orderId,
-    paymentMethod,
-    orderType,
-  });
+  // console.log("Add Order Request Body:", {
+  //   customerInfo,
+  //   selectedOffer,
+  //   selectedVegetables,
+  //   orderId,
+  //   paymentMethod,
+  //   orderType,
+  // });
   if (!customerInfo) {
     return res
       .status(400)
