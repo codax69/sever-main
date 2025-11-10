@@ -50,7 +50,13 @@ async function processCustomer(customerInfo) {
     name: customerInfo.name,
     mobile: customerInfo.mobile,
   };
+  if (customerInfo.city) {
+    updateData.city = customerInfo.city;
+  }
 
+  if (customerInfo.area) {
+    updateData.area = customerInfo.area;
+  }
   if (customerInfo.email) {
     updateData.email = customerInfo.email;
   }
@@ -381,14 +387,14 @@ export const addOrder = asyncHandler(async (req, res) => {
     paymentMethod,
     orderType,
   } = req.body;
-  // console.log("Add Order Request Body:", {
-  //   customerInfo,
-  //   selectedOffer,
-  //   selectedVegetables,
-  //   orderId,
-  //   paymentMethod,
-  //   orderType,
-  // });
+  console.log("Add Order Request Body:", {
+    customerInfo,
+    selectedOffer,
+    selectedVegetables,
+    orderId,
+    paymentMethod,
+    orderType,
+  });
   if (!customerInfo) {
     return res
       .status(400)
