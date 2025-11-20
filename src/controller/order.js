@@ -160,35 +160,50 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
     throw new Error("selectedVegetables must be a non-empty array");
   }
 
-  const identifiers = selectedVegetables
-    .map(getVegetableIdentifier)
-    .filter(Boolean);
+  // Step 1: Get unique vegetable IDs (not ID+weight combinations)
+  const uniqueVegIds = [
+    ...new Set(selectedVegetables.map(getVegetableIdentifier).filter(Boolean)),
+  ];
 
-  if (identifiers.length === 0) {
+  if (uniqueVegIds.length === 0) {
     throw new Error("No valid vegetable identifiers found");
   }
 
-  const isObjectId = identifiers[0].match(/^[0-9a-fA-F]{24}$/);
+  const isObjectId = uniqueVegIds[0].match(/^[0-9a-fA-F]{24}$/);
 
+  // Step 2: Fetch vegetables from database
   const vegetables = await Vegetable.find(
     isObjectId
-      ? { _id: { $in: identifiers } }
-      : { $or: [{ name: { $in: identifiers } }, { _id: { $in: identifiers } }] }
+      ? { _id: { $in: uniqueVegIds } }
+      : {
+          $or: [
+            { name: { $in: uniqueVegIds } },
+            { _id: { $in: uniqueVegIds } },
+          ],
+        }
   );
 
-  if (vegetables.length !== identifiers.length) {
+  if (vegetables.length !== uniqueVegIds.length) {
+    const foundIds = vegetables.map((v) => v._id.toString());
+    const missingIds = uniqueVegIds.filter(
+      (id) => !foundIds.includes(id) && !vegetables.find((v) => v.name === id)
+    );
     throw new Error(
-      `Some vegetables not found. Expected ${identifiers.length}, found ${vegetables.length}`
+      `Some vegetables not found. Expected ${uniqueVegIds.length}, found ${vegetables.length}. Missing IDs: ${missingIds.join(", ")}`
     );
   }
 
+  // Step 3: Create a map for quick lookup
   const vegMap = new Map();
   vegetables.forEach((veg) => {
     vegMap.set(veg._id.toString(), veg);
     vegMap.set(veg.name, veg);
   });
 
-  const processedVegetables = selectedVegetables.map((item) => {
+  // Step 4: Group by vegetable ID + weight combination
+  const groupedItems = new Map();
+
+  selectedVegetables.forEach((item) => {
     const identifier = getVegetableIdentifier(item);
     const vegetable = vegMap.get(identifier);
 
@@ -206,17 +221,34 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
       );
     }
 
-    const price = getPriceForWeight(vegetable, weight);
+    // Create unique key: vegetableId + weight
+    const groupKey = `${vegetable._id.toString()}_${weight}`;
 
-    return {
-      vegetable: vegetable._id,
-      weight,
-      quantity,
-      pricePerUnit: price,
-      subtotal: price * quantity,
-      isFromBasket,
-    };
+    if (groupedItems.has(groupKey)) {
+      // Same vegetable + same weight = increment quantity
+      const existing = groupedItems.get(groupKey);
+      existing.quantity += quantity;
+      existing.subtotal = existing.pricePerUnit * existing.quantity;
+    } else {
+      // Different vegetable or different weight = new entry
+      const price = getPriceForWeight(vegetable, weight);
+      groupedItems.set(groupKey, {
+        vegetable: vegetable._id,
+        weight,
+        quantity,
+        pricePerUnit: price,
+        subtotal: price * quantity,
+        isFromBasket,
+      });
+    }
   });
+
+  // Step 5: Convert Map to Array
+  const processedVegetables = Array.from(groupedItems.values());
+
+  // console.log(
+  //   `📦 Processed: ${selectedVegetables.length} items -> ${processedVegetables.length} unique combinations`
+  // );
 
   return processedVegetables;
 }

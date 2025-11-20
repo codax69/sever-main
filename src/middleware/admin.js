@@ -6,7 +6,7 @@ const adminMiddleware = (req, res, next) => {
     const token =
       req.cookies?.accessToken ||
       req.header("Authorization")?.replace("Bearer ", "").trim();
-
+     console.log(token)
     if (!token) {
       return res.status(401).json({ message: "No token, authorization denied" });
     }
