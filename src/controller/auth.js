@@ -15,7 +15,7 @@ const cookieOptions = {
 
 const accessTokenOptions = {
   ...cookieOptions,
-  maxAge: 15 * 60 * 1000, // 15 minutes
+  maxAge: 30 * 60 * 1000, // 15 minutes
 };
 
 const refreshTokenOptions = {
@@ -28,7 +28,7 @@ const generateTokens = (userId, role) => {
   const accessToken = jwt.sign(
     { id: userId, role, type: "access" },
     process.env.JWT_SECRET,
-    { expiresIn: "15m" }
+    { expiresIn: "30m" }
   );
 
   const refreshToken = jwt.sign(
