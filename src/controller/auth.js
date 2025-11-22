@@ -3,32 +3,32 @@ import jwt from "jsonwebtoken";
 import crypto, { verify } from "crypto";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
-import "dotenv/config";
+import "dotenv/config"
 import { Domain } from "domain";
 
 const cookieOptions = {
-  httpOnly: true,
   secure: true,
+  httpOnly: true,
   sameSite: "none",
-  Domain: "admin.vegbazar.cloud",
+  Domain:"admin.vegbazar.cloud"
 };
-
-// Updated cookie options with new expiry times
 
 const accessTokenOptions = {
   ...cookieOptions,
-  maxAge: 24 * 60 * 60 * 1000,
+  maxAge: 15 * 60 * 1000, // 15 minutes
 };
 
 const refreshTokenOptions = {
   ...cookieOptions,
-  maxAge: 7 * 24 * 60 * 60 * 1000,
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
 };
+
+// Generate tokens
 const generateTokens = (userId, role) => {
   const accessToken = jwt.sign(
     { id: userId, role, type: "access" },
     process.env.JWT_SECRET,
-    { expiresIn: "1d" }
+    { expiresIn: "15m" }
   );
 
   const refreshToken = jwt.sign(
@@ -51,17 +51,17 @@ export const register = async (req, res) => {
 
     // Validation
     if (!username || !email || !password) {
-      return res.status(400).json({
+      return res.status(400).json({ 
         success: false,
-        message: "Username, email, and password are required",
+        message: "Username, email, and password are required" 
       });
     }
 
     const userExists = await User.findOne({ email });
     if (userExists) {
-      return res.status(400).json({
+      return res.status(400).json({ 
         success: false,
-        message: "User already exists",
+        message: "User already exists" 
       });
     }
 
@@ -69,7 +69,7 @@ export const register = async (req, res) => {
       username,
       email,
       password,
-      role: role || "user",
+      role: role || "user", // Default role
     });
 
     const { accessToken, refreshToken } = generateTokens(user._id, user.role);
@@ -98,9 +98,9 @@ export const register = async (req, res) => {
       });
   } catch (error) {
     console.error("Registration error:", error);
-    res.status(500).json({
+    res.status(500).json({ 
       success: false,
-      message: "Registration failed",
+      message: "Registration failed" 
     });
   }
 };
@@ -111,25 +111,25 @@ export const login = async (req, res) => {
 
     // Validation
     if (!email || !password) {
-      return res.status(400).json({
+      return res.status(400).json({ 
         success: false,
-        message: "Email and password are required",
+        message: "Email and password are required" 
       });
     }
 
     const user = await User.findOne({ email }).select("+password");
     if (!user) {
-      return res.status(401).json({
+      return res.status(401).json({ 
         success: false,
-        message: "Invalid credentials",
+        message: "Invalid credentials" 
       });
     }
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({
+      return res.status(401).json({ 
         success: false,
-        message: "Invalid credentials",
+        message: "Invalid credentials" 
       });
     }
 
@@ -140,14 +140,14 @@ export const login = async (req, res) => {
     // Update user with new refresh token and login status
     const loggedInUser = await User.findByIdAndUpdate(
       user._id,
-      {
-        $set: {
+      { 
+        $set: { 
           isLoggedIn: true,
           refreshToken: hashedRefreshToken,
-          accessToken: hashAccessToken,
-          lastLogin: new Date(),
-        },
-        $inc: { logCount: 1 },
+          accessToken:hashAccessToken,
+          lastLogin: new Date()
+        }, 
+        $inc: { logCount: 1 } 
       },
       { new: true }
     ).select("-password -refreshToken");
@@ -170,9 +170,9 @@ export const login = async (req, res) => {
       });
   } catch (error) {
     console.error("Login error:", error);
-    res.status(500).json({
+    res.status(500).json({ 
       success: false,
-      message: "Login failed",
+      message: "Login failed" 
     });
   }
 };
@@ -182,39 +182,39 @@ export const refreshToken = async (req, res) => {
     const { refreshToken } = req.cookies;
 
     if (!refreshToken) {
-      return res.status(401).json({
+      return res.status(401).json({ 
         success: false,
-        message: "Refresh token not found",
+        message: "Refresh token not found" 
       });
     }
 
     // Verify refresh token
     const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-
+    
     if (decoded.type !== "refresh") {
-      return res.status(401).json({
+      return res.status(401).json({ 
         success: false,
-        message: "Invalid token type",
+        message: "Invalid token type" 
       });
     }
 
     const hashedRefreshToken = hashToken(refreshToken);
-    const user = await User.findOne({
-      _id: decoded.id,
+    const user = await User.findOne({ 
+      _id: decoded.id, 
       refreshToken: hashedRefreshToken,
-      isLoggedIn: true,
+      isLoggedIn: true 
     });
 
     if (!user) {
-      return res.status(401).json({
+      return res.status(401).json({ 
         success: false,
-        message: "Invalid refresh token",
+        message: "Invalid refresh token" 
       });
     }
 
     // Generate new tokens
     const { accessToken, refreshToken: newRefreshToken } = generateTokens(
-      user._id,
+      user._id, 
       user.role
     );
     const newHashedRefreshToken = hashToken(newRefreshToken);
@@ -235,18 +235,15 @@ export const refreshToken = async (req, res) => {
       });
   } catch (error) {
     console.error("Token refresh error:", error);
-    if (
-      error.name === "JsonWebTokenError" ||
-      error.name === "TokenExpiredError"
-    ) {
-      return res.status(401).json({
+    if (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError") {
+      return res.status(401).json({ 
         success: false,
-        message: "Invalid or expired refresh token",
+        message: "Invalid or expired refresh token" 
       });
     }
-    res.status(500).json({
+    res.status(500).json({ 
       success: false,
-      message: "Token refresh failed",
+      message: "Token refresh failed" 
     });
   }
 };
@@ -259,7 +256,7 @@ export const logout = async (req, res) => {
       // Clear refresh token from database
       await User.findByIdAndUpdate(userId, {
         $unset: { refreshToken: 1 },
-        $set: { isLoggedIn: false },
+        $set: { isLoggedIn: false }
       });
     }
 
@@ -273,17 +270,15 @@ export const logout = async (req, res) => {
       });
   } catch (error) {
     console.error("Logout error:", error);
-    res.status(500).json({
+    res.status(500).json({ 
       success: false,
-      message: "Logout failed",
+      message: "Logout failed" 
     });
   }
 };
 export const getCurrentUser = asyncHandler(async (req, res, next) => {
   try {
-    return res
-      .status(200)
-      .json(new ApiResponse(200, req.user, "User fetched successfully..!"));
+    return res.status(200).json(new ApiResponse(200, req.user, "User fetched successfully..!"));
   } catch (error) {
     next(error);
   }
@@ -296,7 +291,7 @@ export const logoutAllDevices = async (req, res) => {
       // Clear refresh token from database (logs out from all devices)
       await User.findByIdAndUpdate(userId, {
         $unset: { refreshToken: 1 },
-        $set: { isLoggedIn: false },
+        $set: { isLoggedIn: false }
       });
     }
 
@@ -310,9 +305,9 @@ export const logoutAllDevices = async (req, res) => {
       });
   } catch (error) {
     console.error("Logout all devices error:", error);
-    res.status(500).json({
+    res.status(500).json({ 
       success: false,
-      message: "Logout from all devices failed",
+      message: "Logout from all devices failed" 
     });
   }
 };
