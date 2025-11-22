@@ -7,7 +7,7 @@ app.use(json({ limit: "16kb" }));
 app.use(cookieParser());
 app.use(
   cors({
-    origin: "*",
+    origin: ["https://admin.vegbazar.cloud", "https://vegbazar.store"],
     credentials: true,
   })
 );
