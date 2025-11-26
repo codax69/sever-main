@@ -10,6 +10,7 @@ import {
   calculateTodayOrderTotal,
   calculatePrice,
   updateOrderStatus,
+  validateCouponForBasket
 } from "../controller/order.js";
 import adminMiddleware from "../middleware/admin.js";
 
@@ -18,7 +19,7 @@ const router = Router();
 // Public routes - accessible by all users
 router.get("/", getOrders);
 router.get("/:orderId", getOrderById);
-
+router.post('/validate-coupon-basket', validateCouponForBasket);
 // Protected routes - only admin can access
 router.delete("/:id", adminMiddleware, deleteOrder);
 router.patch("/:id", adminMiddleware, updateOrder);

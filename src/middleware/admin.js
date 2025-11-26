@@ -6,17 +6,14 @@ const adminMiddleware = (req, res, next) => {
     const token =
       req.cookies?.accessToken ||
       req.header("Authorization")?.replace("Bearer ", "").trim();
-     console.log(token)
     if (!token) {
-      return res.status(401).json({ message: "No token, authorization denied" });
+      return res
+        .status(401)
+        .json({ message: "No token, authorization denied" });
     }
-    
 
     // Verify access token
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET
-    );
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     // Role check (only admin allowed)
     if (decoded.role !== "admin") {
@@ -30,7 +27,9 @@ const adminMiddleware = (req, res, next) => {
     next();
   } catch (error) {
     if (error.name === "TokenExpiredError") {
-      return res.status(401).json({ message: "Token expired, please login again" });
+      return res
+        .status(401)
+        .json({ message: "Token expired, please login again" });
     }
     if (error.name === "JsonWebTokenError") {
       return res.status(401).json({ message: "Invalid token" });

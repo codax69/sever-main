@@ -18,7 +18,10 @@ app.use((req, res, next) => {
   }
 
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PATCH,DELETE,OPTIONS"
+  );
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, X-Requested-With"
@@ -44,6 +47,7 @@ import otpRoutes from "./src/routes/otp.js";
 import invoiceRoutes from "./src/routes/invoice.js";
 import captchaRoutes from "./src/routes/captcha.js";
 import testimonialRoutes from "./src/routes/testimonial.js";
+import couponRoutes from "./src/routes/coupon.js";
 app.use("/api/cities", cityRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/vegetables", vegetableRoutes);
@@ -53,4 +57,5 @@ app.use("/api/testimonials", testimonialRoutes);
 app.use("/api/invoice", invoiceRoutes);
 app.use("/api/otp", otpRoutes);
 app.use("/api", captchaRoutes);
+app.use("/api/coupons", couponRoutes);
 export { app };

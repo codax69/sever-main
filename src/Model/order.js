@@ -70,7 +70,7 @@ const orderSchema = new mongoose.Schema(
       default: Date.now,
     },
 
-    // Total of all vegetables
+    // Total of all vegetables (before coupon discount)
     vegetablesTotal: {
       type: Number,
       required: true,
@@ -84,6 +84,32 @@ const orderSchema = new mongoose.Schema(
       min: 0,
       default: 0,
     },
+
+    // ===== NEW: COUPON FIELDS =====
+    // Coupon code applied to the order
+    couponCode: {
+      type: String,
+      uppercase: true,
+      trim: true,
+      default: null,
+    },
+
+    // Discount amount from coupon
+    couponDiscount: {
+      type: Number,
+      min: [0, "Coupon discount cannot be negative"],
+      default: 0,
+    },
+
+    // Subtotal after applying coupon discount
+    // For custom orders: vegetablesTotal - couponDiscount
+    // For basket orders: offerPrice - couponDiscount
+    subtotalAfterDiscount: {
+      type: Number,
+      required: true,
+      min: [0, "Subtotal after discount cannot be negative"],
+    },
+    // ===== END COUPON FIELDS =====
 
     // Discount applied (if basket has special pricing)
     discount: {
@@ -99,6 +125,7 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
+    // Final total: subtotalAfterDiscount + deliveryCharges
     totalAmount: {
       type: Number,
       required: true,
@@ -110,6 +137,7 @@ const orderSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true,
+      index: true,
     },
 
     paymentMethod: {
@@ -152,6 +180,24 @@ orderSchema.virtual("uniqueVegetablesCount").get(function () {
   return this.selectedVegetables.length;
 });
 
+// NEW: Virtual to check if coupon was applied
+orderSchema.virtual("hasCoupon").get(function () {
+  return this.couponDiscount > 0 && this.couponCode != null;
+});
+
+// NEW: Virtual to calculate total savings
+orderSchema.virtual("totalSavings").get(function () {
+  let savings = this.couponDiscount || 0;
+
+  // Add delivery charges savings if free delivery was applied
+  const DELIVERY_CHARGES = 30; // Import from your const.js if needed
+  if (this.deliveryCharges === 0 && this.subtotalAfterDiscount > 250) {
+    savings += DELIVERY_CHARGES;
+  }
+
+  return savings;
+});
+
 // Pre-save validation
 orderSchema.pre("save", function (next) {
   // Validate vegetables total
@@ -160,24 +206,39 @@ orderSchema.pre("save", function (next) {
     0
   );
 
-  if (Math.abs(this.vegetablesTotal - calculatedVegTotal) > 0.01) {
+  if (this.orderType === "custom") {
+    if (Math.abs(this.vegetablesTotal - calculatedVegTotal) > 0.01) {
+      return next(
+        new Error(
+          `Vegetables total mismatch. Expected ${calculatedVegTotal}, got ${this.vegetablesTotal}`
+        )
+      );
+    }
+  }
+
+  // NEW: Validate coupon discount
+  if (this.couponDiscount < 0) {
+    return next(new Error("Coupon discount cannot be negative"));
+  }
+
+  // NEW: Validate subtotalAfterDiscount calculation
+  let expectedSubtotal;
+  if (this.orderType === "basket") {
+    expectedSubtotal = this.offerPrice - this.couponDiscount;
+  } else {
+    expectedSubtotal = this.vegetablesTotal - this.couponDiscount;
+  }
+
+  if (Math.abs(this.subtotalAfterDiscount - expectedSubtotal) > 0.01) {
     return next(
       new Error(
-        `Vegetables total mismatch. Expected ${calculatedVegTotal}, got ${this.vegetablesTotal}`
+        `Subtotal after discount mismatch. Expected ${expectedSubtotal}, got ${this.subtotalAfterDiscount}`
       )
     );
   }
 
-  // Calculate total differently based on order type
-  let calculatedTotal;
-
-  if (this.orderType === "basket") {
-    // For basket: offerPrice (preset basket price) + delivery
-    calculatedTotal = this.offerPrice + this.deliveryCharges;
-  } else {
-    // For custom: sum of vegetables + delivery
-    calculatedTotal = this.vegetablesTotal + this.deliveryCharges;
-  }
+  // Validate total amount: subtotalAfterDiscount + deliveryCharges
+  const calculatedTotal = this.subtotalAfterDiscount + this.deliveryCharges;
 
   if (Math.abs(this.totalAmount - calculatedTotal) > 0.01) {
     return next(
@@ -194,6 +255,7 @@ orderSchema.pre("save", function (next) {
 orderSchema.index({ customerInfo: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1 });
 orderSchema.index({ orderType: 1 });
+orderSchema.index({ couponCode: 1 }); // NEW: Index for coupon queries
 
 orderSchema.set("toJSON", { virtuals: true });
 orderSchema.set("toObject", { virtuals: true });

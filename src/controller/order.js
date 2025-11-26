@@ -2,9 +2,11 @@ import Order from "../Model/order.js";
 import Customer from "../Model/customer.js";
 import Vegetable from "../Model/vegetable.js";
 import Offer from "../Model/offer.js";
+import Coupon from "../Model/coupon.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { ApiError } from "../utility/ApiError.js";
+import { incrementCouponUsage } from "./coupon.js";
 import Razorpay from "razorpay";
 import crypto from "crypto";
 import "dotenv/config";
@@ -15,19 +17,19 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_SECRET,
 });
 
-function getPriceForWeight(vegetable, weight) {
-  const weightMap = {
-    "1kg": "weight1kg",
-    "500g": "weight500g",
-    "250g": "weight250g",
-    "100g": "weight100g",
-  };
+// Fixed: Moved weightMap to module scope and fixed function logic
+const weightMap = {
+  "1kg": "weight1kg",
+  "500g": "weight500g",
+  "250g": "weight250g",
+  "100g": "weight100g",
+};
 
+function getPriceForWeight(vegetable, weight) {
   const priceKey = weightMap[weight];
   if (!priceKey || !vegetable.prices?.[priceKey]) {
     throw new Error(`Invalid weight: ${weight}`);
   }
-
   return vegetable.prices[priceKey];
 }
 
@@ -50,20 +52,11 @@ async function processCustomer(customerInfo) {
     name: customerInfo.name,
     mobile: customerInfo.mobile,
   };
-  if (customerInfo.city) {
-    updateData.city = customerInfo.city;
-  }
 
-  if (customerInfo.area) {
-    updateData.area = customerInfo.area;
-  }
-  if (customerInfo.email) {
-    updateData.email = customerInfo.email;
-  }
-
-  if (customerInfo.address) {
-    updateData.address = customerInfo.address;
-  }
+  if (customerInfo.city) updateData.city = customerInfo.city;
+  if (customerInfo.area) updateData.area = customerInfo.area;
+  if (customerInfo.email) updateData.email = customerInfo.email;
+  if (customerInfo.address) updateData.address = customerInfo.address;
 
   try {
     let customer = await Customer.findOne({ mobile: customerInfo.mobile });
@@ -160,7 +153,6 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
     throw new Error("selectedVegetables must be a non-empty array");
   }
 
-  // Step 1: Get unique vegetable IDs (not ID+weight combinations)
   const uniqueVegIds = [
     ...new Set(selectedVegetables.map(getVegetableIdentifier).filter(Boolean)),
   ];
@@ -171,7 +163,6 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
 
   const isObjectId = uniqueVegIds[0].match(/^[0-9a-fA-F]{24}$/);
 
-  // Step 2: Fetch vegetables from database
   const vegetables = await Vegetable.find(
     isObjectId
       ? { _id: { $in: uniqueVegIds } }
@@ -193,14 +184,12 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
     );
   }
 
-  // Step 3: Create a map for quick lookup
   const vegMap = new Map();
   vegetables.forEach((veg) => {
     vegMap.set(veg._id.toString(), veg);
     vegMap.set(veg.name, veg);
   });
 
-  // Step 4: Group by vegetable ID + weight combination
   const groupedItems = new Map();
 
   selectedVegetables.forEach((item) => {
@@ -221,16 +210,13 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
       );
     }
 
-    // Create unique key: vegetableId + weight
     const groupKey = `${vegetable._id.toString()}_${weight}`;
 
     if (groupedItems.has(groupKey)) {
-      // Same vegetable + same weight = increment quantity
       const existing = groupedItems.get(groupKey);
       existing.quantity += quantity;
       existing.subtotal = existing.pricePerUnit * existing.quantity;
     } else {
-      // Different vegetable or different weight = new entry
       const price = getPriceForWeight(vegetable, weight);
       groupedItems.set(groupKey, {
         vegetable: vegetable._id,
@@ -243,14 +229,7 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
     }
   });
 
-  // Step 5: Convert Map to Array
-  const processedVegetables = Array.from(groupedItems.values());
-
-  // console.log(
-  //   `📦 Processed: ${selectedVegetables.length} items -> ${processedVegetables.length} unique combinations`
-  // );
-
-  return processedVegetables;
+  return Array.from(groupedItems.values());
 }
 
 async function processOrderData(
@@ -261,7 +240,6 @@ async function processOrderData(
 ) {
   try {
     const isBasketOrder = orderType === "basket";
-
     const customerId = await processCustomer(customerInfo);
     const offerId = isBasketOrder ? await processOffer(selectedOffer) : null;
     const processedVegetables = await processVegetables(
@@ -278,7 +256,8 @@ async function processOrderData(
 function calculateOrderTotal(
   processedVegetables,
   offerPrice = null,
-  orderType = "custom"
+  orderType = "custom",
+  couponDiscount = 0
 ) {
   const vegetablesTotal = processedVegetables.reduce(
     (sum, item) => sum + item.subtotal,
@@ -290,6 +269,7 @@ function calculateOrderTotal(
   let totalAmount;
   let finalOfferPrice = 0;
   let appliedDeliveryCharges = 0;
+  let subtotalAfterDiscount = 0;
 
   if (orderType === "basket") {
     if (!offerPrice) {
@@ -297,33 +277,97 @@ function calculateOrderTotal(
     }
 
     finalOfferPrice = offerPrice;
+    subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
     appliedDeliveryCharges = deliveryChargesInRupees;
-    totalAmount = offerPrice + deliveryChargesInRupees;
-
-    // console.log("Basket Order - Offer Price:", offerPrice);
-    // console.log("Basket Order - Delivery Charges:", deliveryChargesInRupees);
-    // console.log("Basket Order - Total Amount:", totalAmount);
+    totalAmount = subtotalAfterDiscount + deliveryChargesInRupees;
   } else {
-    if (vegetablesTotal > 250) {
+    subtotalAfterDiscount = Math.max(0, vegetablesTotal - couponDiscount);
+
+    if (subtotalAfterDiscount > 250) {
       appliedDeliveryCharges = 0;
-      totalAmount = vegetablesTotal;
-      // console.log("Custom Order - Free Delivery");
+      totalAmount = subtotalAfterDiscount;
     } else {
       appliedDeliveryCharges = deliveryChargesInRupees;
-      totalAmount = vegetablesTotal + deliveryChargesInRupees;
-      // console.log("Custom Order - Delivery Charges Applied");
+      totalAmount = subtotalAfterDiscount + deliveryChargesInRupees;
     }
-
-    // console.log("Custom Order - Vegetables Total:", vegetablesTotal);
-    // console.log("Custom Order - Total Amount:", totalAmount);
   }
 
   return {
     vegetablesTotal,
     offerPrice: finalOfferPrice,
+    couponDiscount,
+    subtotalAfterDiscount,
     deliveryCharges: appliedDeliveryCharges,
     totalAmount,
   };
+}
+
+// Fixed: Centralized coupon validation function
+async function validateAndApplyCoupon(couponCode, subtotal, customerId = null) {
+  if (!couponCode) {
+    return {
+      couponId: null,
+      couponDiscount: 0,
+      validatedCouponCode: null,
+      couponDetails: null,
+    };
+  }
+
+  try {
+    const coupon = await Coupon.findOne({
+      code: couponCode.toUpperCase(),
+      isActive: true,
+    });
+
+    if (!coupon) {
+      throw new Error("Invalid coupon code");
+    }
+
+    // Check expiry
+    if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
+      throw new Error("Coupon has expired");
+    }
+
+    // Check minimum order amount
+    if (coupon.minOrderAmount && subtotal < coupon.minOrderAmount) {
+      throw new Error(
+        `Minimum order amount of ₹${coupon.minOrderAmount} required for this coupon`
+      );
+    }
+
+    // Check usage limits
+    if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
+      throw new Error("Coupon usage limit reached");
+    }
+
+    // Check per-user limit if customerId is provided
+    if (customerId && coupon.perUserLimit) {
+      const userUsageCount =
+        coupon.usedBy?.filter((id) => id.toString() === customerId.toString())
+          .length || 0;
+      if (userUsageCount >= coupon.perUserLimit) {
+        throw new Error("You have reached the usage limit for this coupon");
+      }
+    }
+
+    // Calculate discount
+    const couponDiscount = coupon.calculateDiscount(subtotal);
+
+    return {
+      couponId: coupon._id,
+      couponDiscount,
+      validatedCouponCode: coupon.code,
+      couponDetails: {
+        code: coupon.code,
+        discountType: coupon.discountType,
+        discountValue: coupon.discountValue,
+        applied: true,
+        discount: couponDiscount,
+      },
+    };
+  } catch (error) {
+    throw error;
+  }
 }
 
 export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
@@ -337,6 +381,7 @@ export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
     const count = await Order.countDocuments({
       createdAt: { $gte: startOfDay, $lte: endOfDay },
     });
+
     res.json(
       new ApiResponse(
         200,
@@ -347,8 +392,7 @@ export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
   } catch (error) {
     throw new ApiError(
       500,
-      error.message,
-      "Failed to calculate today's order total"
+      error.message || "Failed to calculate today's order total"
     );
   }
 });
@@ -410,6 +454,49 @@ export const getOrderById = asyncHandler(async (req, res) => {
   res.json(new ApiResponse(200, order, "Order fetched successfully"));
 });
 
+export const updateOrderStatus = asyncHandler(async (req, res) => {
+  const { _id } = req.params;
+  const { orderStatus } = req.body;
+
+  const validStatuses = [
+    "placed",
+    "processed",
+    "shipped",
+    "delivered",
+    "cancelled",
+  ];
+
+  if (!orderStatus || !validStatuses.includes(orderStatus)) {
+    return res
+      .status(400)
+      .json(
+        new ApiResponse(
+          400,
+          null,
+          `Invalid order status. Must be one of: ${validStatuses.join(", ")}`
+        )
+      );
+  }
+
+  const order = await Order.findByIdAndUpdate(
+    _id,
+    { orderStatus },
+    {
+      new: true,
+      runValidators: true,
+    }
+  )
+    .populate("customerInfo")
+    .populate("selectedOffer")
+    .populate("selectedVegetables.vegetable");
+
+  if (!order) {
+    return res.status(404).json(new ApiResponse(404, null, "Order not found"));
+  }
+
+  res.json(new ApiResponse(200, order, "Order status updated successfully"));
+});
+
 export const addOrder = asyncHandler(async (req, res) => {
   const {
     customerInfo,
@@ -418,15 +505,10 @@ export const addOrder = asyncHandler(async (req, res) => {
     orderId,
     paymentMethod,
     orderType,
+    couponCode,
   } = req.body;
-  // console.log("Add Order Request Body:", {
-  //   customerInfo,
-  //   selectedOffer,
-  //   selectedVegetables,
-  //   orderId,
-  //   paymentMethod,
-  //   orderType,
-  // });
+
+  // Validation
   if (!customerInfo) {
     return res
       .status(400)
@@ -487,6 +569,7 @@ export const addOrder = asyncHandler(async (req, res) => {
       );
   }
 
+  // Process order data
   const processed = await processOrderData(
     customerInfo,
     selectedOffer,
@@ -500,33 +583,81 @@ export const addOrder = asyncHandler(async (req, res) => {
 
   const { customerId, offerId, processedVegetables } = processed;
 
-  let offerPrice = null;
+  // ✅ FIXED: Different coupon validation for basket vs custom orders
+  let couponId = null;
+  let couponDiscount = 0;
+  let validatedCouponCode = null;
+  let subtotalForCoupon = 0;
+
   if (orderType === "basket") {
+    // For basket orders, validate against offer price
     const offer = await Offer.findById(offerId);
     if (!offer) {
       return res
         .status(404)
         .json(new ApiResponse(404, null, "Offer not found"));
     }
-    offerPrice = offer.price;
+    subtotalForCoupon = offer.price;
+  } else {
+    // For custom orders, calculate from vegetable prices
+    subtotalForCoupon = processedVegetables.reduce(
+      (sum, item) => sum + item.subtotal,
+      0
+    );
   }
 
-  const totals = calculateOrderTotal(
-    processedVegetables,
-    offerPrice,
-    orderType
-  );
+  // Validate and apply coupon
+  if (couponCode) {
+    try {
+      const couponValidation = await validateAndApplyCoupon(
+        couponCode,
+        subtotalForCoupon,
+        customerId
+      );
+      couponId = couponValidation.couponId;
+      couponDiscount = couponValidation.couponDiscount;
+      validatedCouponCode = couponValidation.validatedCouponCode;
+    } catch (error) {
+      return res.status(400).json(new ApiResponse(400, null, error.message));
+    }
+  }
 
+  // ✅ FIXED: Calculate totals based on order type
+  let totals;
+  if (orderType === "basket") {
+    const offer = await Offer.findById(offerId);
+    // Basket orders always have ₹20 delivery charge
+    const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
+    const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
+    
+    totals = {
+      vegetablesTotal: 0, // Not applicable for basket
+      offerPrice: offer.price,
+      couponDiscount,
+      subtotalAfterDiscount,
+      deliveryCharges: deliveryChargesInRupees,
+      totalAmount: subtotalAfterDiscount + deliveryChargesInRupees,
+    };
+  } else {
+    // Custom orders - use existing logic with free delivery above ₹250
+    totals = calculateOrderTotal(
+      processedVegetables,
+      null,
+      orderType,
+      couponDiscount
+    );
+  }
+
+  // Handle COD payment
   if (paymentMethod === "COD") {
     const orderData = {
       orderType,
       customerInfo: customerId,
       selectedVegetables: processedVegetables,
       orderDate: new Date(),
-      totalAmount: totals.totalAmount,
-      vegetablesTotal: totals.vegetablesTotal,
-      offerPrice: totals.offerPrice,
-      deliveryCharges: totals.deliveryCharges,
+      couponCode: validatedCouponCode,
+      couponId,
+      ...totals,
       orderId,
       paymentMethod: "COD",
       paymentStatus: "pending",
@@ -539,6 +670,11 @@ export const addOrder = asyncHandler(async (req, res) => {
 
     const order = await Order.create(orderData);
 
+    // Increment coupon usage
+    if (couponId) {
+      await incrementCouponUsage(couponId, customerId);
+    }
+
     const populatedOrder = await Order.findById(order._id)
       .populate("customerInfo")
       .populate("selectedOffer")
@@ -549,6 +685,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     );
   }
 
+  // Handle online payment
   const amountInPaisa = Math.round(totals.totalAmount * 100);
 
   const razorpayOrder = await razorpay.orders.create({
@@ -563,6 +700,8 @@ export const addOrder = asyncHandler(async (req, res) => {
     customerInfo: customerId,
     selectedVegetables: processedVegetables,
     orderId,
+    couponCode: validatedCouponCode,
+    couponId,
     ...totals,
   };
 
@@ -582,6 +721,8 @@ export const addOrder = asyncHandler(async (req, res) => {
   );
 });
 
+
+// ✅ UPDATED: Modified verifyPayment to handle basket orders correctly
 export const verifyPayment = asyncHandler(async (req, res) => {
   const {
     razorpay_order_id,
@@ -592,8 +733,10 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     selectedVegetables,
     orderId,
     orderType,
+    couponCode,
   } = req.body;
-  // console.log(orderType);
+
+  // Validation
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
     return res
       .status(400)
@@ -612,6 +755,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       .json(new ApiResponse(400, null, "Missing offer for basket order"));
   }
 
+  // Verify signature
   const body = `${razorpay_order_id}|${razorpay_payment_id}`;
   const expectedSignature = crypto
     .createHmac("sha256", process.env.RAZORPAY_SECRET)
@@ -630,6 +774,20 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       );
   }
 
+  // Check for duplicate payment
+  const existingOrder = await Order.findOne({
+    razorpayPaymentId: razorpay_payment_id,
+  });
+
+  if (existingOrder) {
+    return res
+      .status(400)
+      .json(
+        new ApiResponse(400, null, "Order already exists for this payment")
+      );
+  }
+
+  // Process order data
   const processed = await processOrderData(
     customerInfo,
     selectedOffer,
@@ -643,7 +801,12 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 
   const { customerId, offerId, processedVegetables } = processed;
 
-  let offerPrice = null;
+  // ✅ FIXED: Different coupon validation for basket vs custom orders
+  let couponId = null;
+  let couponDiscount = 0;
+  let validatedCouponCode = null;
+  let subtotalForCoupon = 0;
+
   if (orderType === "basket") {
     const offer = await Offer.findById(offerId);
     if (!offer) {
@@ -651,36 +814,63 @@ export const verifyPayment = asyncHandler(async (req, res) => {
         .status(404)
         .json(new ApiResponse(404, null, "Offer not found"));
     }
-    offerPrice = offer.price;
+    subtotalForCoupon = offer.price;
+  } else {
+    subtotalForCoupon = processedVegetables.reduce(
+      (sum, item) => sum + item.subtotal,
+      0
+    );
   }
 
-  const totals = calculateOrderTotal(
-    processedVegetables,
-    offerPrice,
-    orderType
-  );
-
-  const existingOrder = await Order.findOne({
-    razorpayPaymentId: razorpay_payment_id,
-  });
-
-  if (existingOrder) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "Order already exists for this payment")
+  // Validate coupon (silent fail on error)
+  if (couponCode) {
+    try {
+      const couponValidation = await validateAndApplyCoupon(
+        couponCode,
+        subtotalForCoupon,
+        customerId
       );
+      couponId = couponValidation.couponId;
+      couponDiscount = couponValidation.couponDiscount;
+      validatedCouponCode = couponValidation.validatedCouponCode;
+    } catch (error) {
+      console.error("Coupon validation error during payment:", error.message);
+    }
   }
 
+  // ✅ FIXED: Calculate totals based on order type
+  let totals;
+  if (orderType === "basket") {
+    const offer = await Offer.findById(offerId);
+    const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
+    const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
+    
+    totals = {
+      vegetablesTotal: 0,
+      offerPrice: offer.price,
+      couponDiscount,
+      subtotalAfterDiscount,
+      deliveryCharges: deliveryChargesInRupees,
+      totalAmount: subtotalAfterDiscount + deliveryChargesInRupees,
+    };
+  } else {
+    totals = calculateOrderTotal(
+      processedVegetables,
+      null,
+      orderType,
+      couponDiscount
+    );
+  }
+
+  // Create order
   const orderData = {
     orderType,
     customerInfo: customerId,
     selectedVegetables: processedVegetables,
     orderDate: new Date(),
-    totalAmount: totals.totalAmount,
-    vegetablesTotal: totals.vegetablesTotal,
-    offerPrice: totals.offerPrice,
-    deliveryCharges: totals.deliveryCharges,
+    couponCode: validatedCouponCode,
+    couponId,
+    ...totals,
     orderId,
     paymentMethod: "ONLINE",
     orderStatus: "placed",
@@ -695,6 +885,11 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 
   const order = await Order.create(orderData);
 
+  // Increment coupon usage
+  if (couponId) {
+    await incrementCouponUsage(couponId, customerId);
+  }
+
   const populatedOrder = await Order.findById(order._id)
     .populate("customerInfo")
     .populate("selectedOffer")
@@ -708,6 +903,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     )
   );
 });
+
 
 export const deleteOrder = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -733,12 +929,15 @@ export const updateOrder = asyncHandler(async (req, res) => {
     return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
   }
 
+  // Prevent updating sensitive fields
   delete updateData.razorpayOrderId;
   delete updateData.razorpayPaymentId;
   delete updateData.totalAmount;
   delete updateData.vegetablesTotal;
   delete updateData.offerPrice;
   delete updateData.orderType;
+  delete updateData.couponDiscount;
+  delete updateData.subtotalAfterDiscount;
 
   const order = await Order.findByIdAndUpdate(id, updateData, {
     new: true,
@@ -772,8 +971,9 @@ export const getRazorpayKey = asyncHandler(async (req, res) => {
 });
 
 export const calculatePrice = asyncHandler(async (req, res) => {
-  const { items } = req.body;
-  // console.log(items);
+  const { items, couponCode } = req.body;
+  console.log({ items, couponCode });
+
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new ApiError(400, "Items array is required and cannot be empty");
   }
@@ -781,6 +981,7 @@ export const calculatePrice = asyncHandler(async (req, res) => {
   let subtotal = 0;
   const calculatedItems = [];
 
+  // Calculate items subtotal
   for (const item of items) {
     if (!item.vegetableId || !item.weight || !item.quantity) {
       throw new ApiError(
@@ -813,26 +1014,56 @@ export const calculatePrice = asyncHandler(async (req, res) => {
     subtotal += itemSubtotal;
   }
 
+  // Apply coupon discount (non-blocking)
+  let couponDiscount = 0;
+  let couponDetails = null;
+
+  if (couponCode) {
+    try {
+      const couponValidation = await validateAndApplyCoupon(
+        couponCode,
+        subtotal,
+        null // No customer ID for price calculation
+      );
+
+      couponDiscount = couponValidation.couponDiscount;
+      couponDetails = couponValidation.couponDetails;
+    } catch (error) {
+      // Return error details for invalid coupon
+      couponDetails = {
+        code: couponCode,
+        applied: false,
+        error: error.message,
+      };
+    }
+  }
+
+  // Calculate final amounts
+  const subtotalAfterDiscount = Math.max(0, subtotal - couponDiscount);
   const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
+
   let appliedDeliveryCharges = 0;
   let freeDelivery = false;
 
-  if (subtotal > 250) {
+  if (subtotalAfterDiscount > 250) {
     appliedDeliveryCharges = 0;
     freeDelivery = true;
   } else {
     appliedDeliveryCharges = deliveryChargesInRupees;
   }
 
-  const totalAmount = subtotal + appliedDeliveryCharges;
+  const totalAmount = subtotalAfterDiscount + appliedDeliveryCharges;
 
   return res.json(
     new ApiResponse(
       200,
       {
         items: calculatedItems,
+        coupon: couponDetails,
         summary: {
           subtotal,
+          couponDiscount,
+          subtotalAfterDiscount,
           deliveryCharges: appliedDeliveryCharges,
           freeDelivery,
           totalAmount,
@@ -843,48 +1074,98 @@ export const calculatePrice = asyncHandler(async (req, res) => {
     )
   );
 });
-export const updateOrderStatus = asyncHandler(async (req, res) => {
-  const { _id } = req.params;
-  const { orderStatus } = req.body;
-  // console.log(orderStatus)
-  // Validate order ID format
+export const validateCouponForBasket = asyncHandler(async (req, res) => {
+  const { offerId, offerPrice, couponCode } = req.body;
 
-  // Validate orderStatus
-  const validStatuses = [
-    "placed",
-    "processed",
-    "shipped",
-    "delivered",
-    "cancelled",
-  ];
-  if (!orderStatus || !validStatuses.includes(orderStatus)) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(
-          400,
-          null,
-          `Invalid order status. Must be one of: ${validStatuses.join(", ")}`
-        )
-      );
+  // Validation
+  if (!offerId || !offerPrice) {
+    throw new ApiError(400, "Offer ID and price are required");
   }
 
-  // Find and update the order
-  const order = await Order.findByIdAndUpdate(
-    _id,
-    { orderStatus },
-    {
-      new: true,
-      runValidators: true,
+  if (!couponCode) {
+    throw new ApiError(400, "Coupon code is required");
+  }
+
+  // Verify offer exists
+  const offer = await Offer.findById(offerId);
+  if (!offer) {
+    throw new ApiError(404, "Offer not found");
+  }
+
+  // Validate offer price matches
+  if (offer.price !== offerPrice) {
+    throw new ApiError(400, "Offer price mismatch");
+  }
+
+  let couponDetails = null;
+  let couponDiscount = 0;
+
+  try {
+    // Find and validate coupon
+    const coupon = await Coupon.findOne({
+      code: couponCode.toUpperCase(),
+      isActive: true,
+    });
+
+    if (!coupon) {
+      throw new Error("Invalid coupon code");
     }
-  )
-    .populate("customerInfo")
-    .populate("selectedOffer")
-    .populate("selectedVegetables.vegetable");
 
-  if (!order) {
-    return res.status(404).json(new ApiResponse(404, null, "Order not found"));
+    // Check expiry
+    if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
+      throw new Error("Coupon has expired");
+    }
+
+    // Check minimum order amount (against offer price)
+    if (coupon.minOrderAmount && offerPrice < coupon.minOrderAmount) {
+      throw new Error(
+        `Minimum order amount of ₹${coupon.minOrderAmount} required for this coupon`
+      );
+    }
+
+    // Check usage limits
+    if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
+      throw new Error("Coupon usage limit reached");
+    }
+
+    // Calculate discount on offer price
+    couponDiscount = coupon.calculateDiscount(offerPrice);
+
+    couponDetails = {
+      code: coupon.code,
+      discountType: coupon.discountType,
+      discountValue: coupon.discountValue,
+      applied: true,
+      discount: couponDiscount,
+    };
+  } catch (error) {
+    // Return error in response, not as HTTP error
+    couponDetails = {
+      code: couponCode,
+      applied: false,
+      error: error.message,
+    };
   }
 
-  res.json(new ApiResponse(200, order, "Order status updated successfully"));
+  // Calculate final amounts
+  const subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
+
+  // Basket orders always have fixed delivery charge of ₹20
+  const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
+  const totalAmount = subtotalAfterDiscount + deliveryChargesInRupees;
+
+  return res.json(
+    new ApiResponse(
+      200,
+      {
+        coupon: couponDetails,
+        offerPrice,
+        couponDiscount,
+        subtotalAfterDiscount,
+        deliveryCharges: deliveryChargesInRupees,
+        totalAmount,
+      },
+      "Coupon validation completed"
+    )
+  );
 });
