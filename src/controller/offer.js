@@ -13,7 +13,7 @@ const validateOfferData = (data) => {
     title,
     price,
     vegetables,
-    vegetableLimit,
+    // vegetableLimit,
     weight,
     totalWeight,
   };
