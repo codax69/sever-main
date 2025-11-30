@@ -972,7 +972,7 @@ export const getRazorpayKey = asyncHandler(async (req, res) => {
 
 export const calculatePrice = asyncHandler(async (req, res) => {
   const { items, couponCode } = req.body;
-  console.log({ items, couponCode });
+  // console.log({ items, couponCode });
 
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new ApiError(400, "Items array is required and cannot be empty");

@@ -6,6 +6,7 @@ const adminMiddleware = (req, res, next) => {
     const token =
       req.cookies?.accessToken ||
       req.header("Authorization")?.replace("Bearer ", "").trim();
+      clg(token)
     if (!token) {
       return res
         .status(401)
