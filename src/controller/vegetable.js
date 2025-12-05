@@ -67,7 +67,7 @@ export const addVegetable = asyncHandler(async (req, res) => {
   } = req.body;
 
   // Validation
-  if (!name || !price1kg || !marketPrice1kg || !stockKg) {
+  if (!name || !price1kg || !marketPrice1kg || stockKg === undefined) {
     return res
       .status(400)
       .json(
@@ -97,13 +97,16 @@ export const addVegetable = asyncHandler(async (req, res) => {
       );
   }
 
-  if (isNaN(stockKg) || parseFloat(stockKg) <= 0) {
+  // Allow 0 stock but must be a valid number
+  if (isNaN(stockKg) || parseFloat(stockKg) < 0) {
     return res
       .status(400)
       .json(
-        new ApiResponse(400, null, "Stock must be a valid positive number")
+        new ApiResponse(400, null, "Stock must be a valid non-negative number")
       );
   }
+
+  const stockValue = parseFloat(stockKg);
 
   // Auto-calculate all weight prices
   const prices = calculatePrices(price1kg);
@@ -115,7 +118,8 @@ export const addVegetable = asyncHandler(async (req, res) => {
     marketPrices,
     offer,
     description,
-    stockKg: parseFloat(stockKg),
+    stockKg: stockValue,
+    outOfStock: stockValue === 0, // Set outOfStock based on stockKg
     image,
     name,
   });
@@ -187,11 +191,12 @@ export const updateVegetable = asyncHandler(async (req, res) => {
       );
   }
 
-  if (stockKg !== undefined && (isNaN(stockKg) || parseFloat(stockKg) <= 0)) {
+  // Allow 0 stock but must be a valid number
+  if (stockKg !== undefined && (isNaN(stockKg) || parseFloat(stockKg) < 0)) {
     return res
       .status(400)
       .json(
-        new ApiResponse(400, null, "Stock must be a valid positive number")
+        new ApiResponse(400, null, "Stock must be a valid non-negative number")
       );
   }
 
@@ -207,7 +212,12 @@ export const updateVegetable = asyncHandler(async (req, res) => {
     updateData.marketPrices = calculatePrices(marketPrice1kg);
   }
 
-  if (stockKg !== undefined) updateData.stockKg = parseFloat(stockKg);
+  if (stockKg !== undefined) {
+    const stockValue = parseFloat(stockKg);
+    updateData.stockKg = stockValue;
+    updateData.outOfStock = stockValue === 0; // Update outOfStock based on stockKg
+  }
+  
   if (image !== undefined) updateData.image = image;
   if (name !== undefined) updateData.name = name;
   if (offer !== undefined) updateData.offer = offer;

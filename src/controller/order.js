@@ -24,6 +24,86 @@ const weightMap = {
   "250g": "weight250g",
   "100g": "weight100g",
 };
+function calculateKgFromWeight(weight, quantity) {
+  const weightToKg = {
+    "1kg": 1,
+    "500g": 0.5,
+    "250g": 0.25,
+    "100g": 0.1,
+  };
+  
+  return weightToKg[weight] * quantity;
+}
+
+/**
+ * Deduct stock for ordered vegetables
+ */
+async function deductVegetableStock(selectedVegetables) {
+  const stockUpdates = [];
+  
+  for (const item of selectedVegetables) {
+    const kgToDeduct = calculateKgFromWeight(item.weight, item.quantity);
+    
+    const vegetable = await Vegetable.findById(item.vegetable);
+    
+    if (!vegetable) {
+      throw new Error(`Vegetable not found: ${item.vegetable}`);
+    }
+    
+    // Check if sufficient stock is available
+    if (vegetable.stockKg < kgToDeduct) {
+      throw new Error(
+        `Insufficient stock for ${vegetable.name}. Available: ${vegetable.stockKg}kg, Required: ${kgToDeduct}kg`
+      );
+    }
+    
+    stockUpdates.push({
+      vegetableId: item.vegetable,
+      vegetableName: vegetable.name,
+      deducted: kgToDeduct,
+      previousStock: vegetable.stockKg,
+    });
+  }
+  
+  // If all checks pass, update all stocks
+  for (const update of stockUpdates) {
+    await Vegetable.findByIdAndUpdate(
+      update.vegetableId,
+      { $inc: { stockKg: -update.deducted } },
+      { new: true }
+    );
+  }
+  
+  return stockUpdates;
+}
+
+/**
+ * Restore stock for cancelled vegetables
+ */
+async function restoreVegetableStock(selectedVegetables) {
+  const stockUpdates = [];
+  
+  for (const item of selectedVegetables) {
+    const kgToRestore = calculateKgFromWeight(item.weight, item.quantity);
+    
+    const vegetable = await Vegetable.findByIdAndUpdate(
+      item.vegetable,
+      { $inc: { stockKg: kgToRestore } },
+      { new: true }
+    );
+    
+    if (vegetable) {
+      stockUpdates.push({
+        vegetableId: item.vegetable,
+        vegetableName: vegetable.name,
+        restored: kgToRestore,
+        newStock: vegetable.stockKg,
+      });
+    }
+  }
+  
+  return stockUpdates;
+}
 
 function getPriceForWeight(vegetable, weight) {
   const priceKey = weightMap[weight];
@@ -478,6 +558,27 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
       );
   }
 
+  // Get the current order
+  const currentOrder = await Order.findById(_id);
+  
+  if (!currentOrder) {
+    return res.status(404).json(new ApiResponse(404, null, "Order not found"));
+  }
+
+  // ✅ If order is being cancelled, restore stock
+  if (orderStatus === "cancelled" && currentOrder.orderStatus !== "cancelled") {
+    try {
+      const stockUpdates = await restoreVegetableStock(
+        currentOrder.selectedVegetables
+      );
+      console.log("Stock restored for cancelled order:", stockUpdates);
+    } catch (error) {
+      console.error("Error restoring stock:", error.message);
+      // Continue with cancellation even if stock restore fails
+    }
+  }
+
+  // Update order status
   const order = await Order.findByIdAndUpdate(
     _id,
     { orderStatus },
@@ -489,10 +590,6 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
     .populate("customerInfo")
     .populate("selectedOffer")
     .populate("selectedVegetables.vegetable");
-
-  if (!order) {
-    return res.status(404).json(new ApiResponse(404, null, "Order not found"));
-  }
 
   res.json(new ApiResponse(200, order, "Order status updated successfully"));
 });
@@ -583,14 +680,13 @@ export const addOrder = asyncHandler(async (req, res) => {
 
   const { customerId, offerId, processedVegetables } = processed;
 
-  // ✅ FIXED: Different coupon validation for basket vs custom orders
+  // Validate and apply coupon
   let couponId = null;
   let couponDiscount = 0;
   let validatedCouponCode = null;
   let subtotalForCoupon = 0;
 
   if (orderType === "basket") {
-    // For basket orders, validate against offer price
     const offer = await Offer.findById(offerId);
     if (!offer) {
       return res
@@ -599,14 +695,12 @@ export const addOrder = asyncHandler(async (req, res) => {
     }
     subtotalForCoupon = offer.price;
   } else {
-    // For custom orders, calculate from vegetable prices
     subtotalForCoupon = processedVegetables.reduce(
       (sum, item) => sum + item.subtotal,
       0
     );
   }
 
-  // Validate and apply coupon
   if (couponCode) {
     try {
       const couponValidation = await validateAndApplyCoupon(
@@ -622,16 +716,15 @@ export const addOrder = asyncHandler(async (req, res) => {
     }
   }
 
-  // ✅ FIXED: Calculate totals based on order type
+  // Calculate totals
   let totals;
   if (orderType === "basket") {
     const offer = await Offer.findById(offerId);
-    // Basket orders always have ₹20 delivery charge
     const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
     const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
     
     totals = {
-      vegetablesTotal: 0, // Not applicable for basket
+      vegetablesTotal: 0,
       offerPrice: offer.price,
       couponDiscount,
       subtotalAfterDiscount,
@@ -639,7 +732,6 @@ export const addOrder = asyncHandler(async (req, res) => {
       totalAmount: subtotalAfterDiscount + deliveryChargesInRupees,
     };
   } else {
-    // Custom orders - use existing logic with free delivery above ₹250
     totals = calculateOrderTotal(
       processedVegetables,
       null,
@@ -650,6 +742,14 @@ export const addOrder = asyncHandler(async (req, res) => {
 
   // Handle COD payment
   if (paymentMethod === "COD") {
+    // ✅ Deduct stock before creating order
+    let stockUpdates;
+    try {
+      stockUpdates = await deductVegetableStock(processedVegetables);
+    } catch (error) {
+      return res.status(400).json(new ApiResponse(400, null, error.message));
+    }
+
     const orderData = {
       orderType,
       customerInfo: customerId,
@@ -662,6 +762,7 @@ export const addOrder = asyncHandler(async (req, res) => {
       paymentMethod: "COD",
       paymentStatus: "pending",
       orderStatus: "placed",
+      stockUpdates, // Store stock update info
     };
 
     if (orderType === "basket") {
@@ -685,7 +786,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     );
   }
 
-  // Handle online payment
+  // Handle online payment - Don't deduct stock yet, wait for payment verification
   const amountInPaisa = Math.round(totals.totalAmount * 100);
 
   const razorpayOrder = await razorpay.orders.create({
@@ -720,7 +821,6 @@ export const addOrder = asyncHandler(async (req, res) => {
     )
   );
 });
-
 
 // ✅ UPDATED: Modified verifyPayment to handle basket orders correctly
 export const verifyPayment = asyncHandler(async (req, res) => {
@@ -801,7 +901,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 
   const { customerId, offerId, processedVegetables } = processed;
 
-  // ✅ FIXED: Different coupon validation for basket vs custom orders
+  // Validate and apply coupon
   let couponId = null;
   let couponDiscount = 0;
   let validatedCouponCode = null;
@@ -822,7 +922,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     );
   }
 
-  // Validate coupon (silent fail on error)
   if (couponCode) {
     try {
       const couponValidation = await validateAndApplyCoupon(
@@ -838,7 +937,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     }
   }
 
-  // ✅ FIXED: Calculate totals based on order type
+  // Calculate totals
   let totals;
   if (orderType === "basket") {
     const offer = await Offer.findById(offerId);
@@ -862,6 +961,23 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     );
   }
 
+  // ✅ Deduct stock after successful payment
+  let stockUpdates;
+  try {
+    stockUpdates = await deductVegetableStock(processedVegetables);
+  } catch (error) {
+    // Payment succeeded but stock insufficient - critical situation
+    // You might want to handle this differently (e.g., notify admin, refund)
+    console.error("Stock deduction failed after payment:", error.message);
+    return res.status(500).json(
+      new ApiResponse(
+        500,
+        null,
+        "Payment successful but stock unavailable. Please contact support."
+      )
+    );
+  }
+
   // Create order
   const orderData = {
     orderType,
@@ -877,6 +993,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     paymentStatus: "completed",
     razorpayOrderId: razorpay_order_id,
     razorpayPaymentId: razorpay_payment_id,
+    stockUpdates, // Store stock update info
   };
 
   if (orderType === "basket") {

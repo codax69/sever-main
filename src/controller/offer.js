@@ -111,7 +111,7 @@ export const getOfferById = asyncHandler(async (req, res) => {
   validateObjectId(id, "Offer ID");
 
   const offer = await Offer.findById(id)
-    .populate("vegetables","id name image marketPrices prices ")
+    .populate("vegetables","id name image marketPrices prices stockKg outOfStock ")
     .lean();
 
   if (!offer) {

@@ -14,7 +14,11 @@ const vegetableSchema = new mongoose.Schema(
     stockKg: {
       type: Number,
       required: [true, "Stock quantity is required"],
-      min: [1, "Stock must be at least 1 kg"],
+      min: [0, "Stock cannot be negative"],
+    },
+    outOfStock: {
+      type: Boolean,
+      default: false,
     },
     description: {
       type: String,
@@ -72,6 +76,12 @@ const vegetableSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// Middleware to automatically set outOfStock based on stockKg
+vegetableSchema.pre("save", function (next) {
+  this.outOfStock = this.stockKg === 0;
+  next();
+});
 
 vegetableSchema.virtual("price").get(function () {
   return this.prices.weight1kg;
