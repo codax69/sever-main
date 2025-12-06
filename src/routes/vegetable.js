@@ -5,6 +5,7 @@ import {
   updateVegetable,
   getVegetables,
   getVegetableById,
+  homepageApi
 } from "../controller/vegetable.js";
 import adminMiddleware from "../middleware/admin.js";
 
