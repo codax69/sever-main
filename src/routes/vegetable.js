@@ -13,7 +13,7 @@ const router = Router();
 // Public routes - accessible by all users
 router.get("/", getVegetables);
 router.get("/:id", getVegetableById);
-
+router.get("/homepage", homepageApi);
 // Protected routes - only admin can access
 router.post(
   "/add",
