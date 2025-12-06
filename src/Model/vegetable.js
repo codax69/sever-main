@@ -90,6 +90,38 @@ vegetableSchema.virtual("price").get(function () {
 vegetableSchema.virtual("marketPrice").get(function () {
   return this.marketPrices.weight1kg;
 });
+// In your Vegetable model file (e.g., vegetable.js)
+
+vegetableSchema.pre('save', function(next) {
+  // Automatically set outOfStock based on stockKg
+  if (this.stockKg < 0.25) {
+    this.outOfStock = true;
+  } else {
+    this.outOfStock = false;
+  }
+  next();
+});
+
+// Also handle findOneAndUpdate operations
+vegetableSchema.pre('findOneAndUpdate', async function(next) {
+  const update = this.getUpdate();
+  
+  // Check if stockKg is being updated
+  if (update.$inc && update.$inc.stockKg !== undefined) {
+    const docToUpdate = await this.model.findOne(this.getQuery());
+    const newStockKg = docToUpdate.stockKg + update.$inc.stockKg;
+    
+    if (newStockKg < 0.25) {
+      update.$set = update.$set || {};
+      update.$set.outOfStock = true;
+    } else {
+      update.$set = update.$set || {};
+      update.$set.outOfStock = false;
+    }
+  }
+  
+  next();
+});
 
 const Vegetable = mongoose.model("Vegetable", vegetableSchema);
 export default Vegetable;
