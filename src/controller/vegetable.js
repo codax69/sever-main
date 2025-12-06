@@ -31,20 +31,7 @@ export const getVegetables = asyncHandler(async (req, res) => {
   res.json(new ApiResponse(200, vegetablesWithWeightOptions, "Vegetables fetched successfully"));
 });
 
-export const homepageApi = asyncHandler(async (req, res) => {
-  // Fetch only in-stock vegetables
-  const vegetables = await Vegetable.find({ outOfStock: false });
-  
-  // Transform data to include weight options for frontend dropdown
-  const vegetablesWithWeightOptions = vegetables.map(veg => ({
-    ...veg.toObject(),
-    weightOptions: [
-      { weight: '1kg', price: veg.prices.weight1kg, marketPrice: veg.marketPrices.weight1kg },
-      { weight: '500g', price: veg.prices.weight500g, marketPrice: veg.marketPrices.weight500g },
-      { weight: '250g', price: veg.prices.weight250g, marketPrice: veg.marketPrices.weight250g },
-      { weight: '100g', price: veg.prices.weight100g, marketPrice: veg.marketPrices.weight100g },
-    ]
-  }));
+
 
 export const getVegetableById = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -267,4 +254,21 @@ export const updateVegetable = asyncHandler(async (req, res) => {
 
     throw error;
   }
+});
+export const homepageApi = asyncHandler(async (req, res) => {
+  // Fetch only in-stock vegetables
+  const vegetables = await Vegetable.find({ outOfStock: false });
+  
+  // Transform data to include weight options for frontend dropdown
+  const vegetablesWithWeightOptions = vegetables.map(veg => ({
+    ...veg.toObject(),
+    weightOptions: [
+      { weight: '1kg', price: veg.prices.weight1kg, marketPrice: veg.marketPrices.weight1kg },
+      { weight: '500g', price: veg.prices.weight500g, marketPrice: veg.marketPrices.weight500g },
+      { weight: '250g', price: veg.prices.weight250g, marketPrice: veg.marketPrices.weight250g },
+      { weight: '100g', price: veg.prices.weight100g, marketPrice: veg.marketPrices.weight100g },
+    ]
+  }));
+
+  res.json(new ApiResponse(200, vegetablesWithWeightOptions, "Vegetables fetched successfully"));
 });
