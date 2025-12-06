@@ -67,11 +67,19 @@ async function deductVegetableStock(selectedVegetables) {
   
   // If all checks pass, update all stocks
   for (const update of stockUpdates) {
-    await Vegetable.findByIdAndUpdate(
+    const updatedVeg = await Vegetable.findByIdAndUpdate(
       update.vegetableId,
       { $inc: { stockKg: -update.deducted } },
       { new: true }
     );
+    
+    // ✅ Auto-set outOfStock if below 0.25kg
+    if (updatedVeg.stockKg < 0.25) {
+      await Vegetable.findByIdAndUpdate(
+        update.vegetableId,
+        { $set: { outOfStock: true } }
+      );
+    }
   }
   
   return stockUpdates;
@@ -93,6 +101,14 @@ async function restoreVegetableStock(selectedVegetables) {
     );
     
     if (vegetable) {
+      // ✅ Auto-set outOfStock to false if stock is restored above 0.25kg
+      if (vegetable.stockKg >= 0.25) {
+        await Vegetable.findByIdAndUpdate(
+          item.vegetable,
+          { $set: { outOfStock: false } }
+        );
+      }
+      
       stockUpdates.push({
         vegetableId: item.vegetable,
         vegetableName: vegetable.name,
