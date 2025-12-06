@@ -15,7 +15,8 @@ const calculatePrices = (price1kg) => {
 };
 
 export const getVegetables = asyncHandler(async (req, res) => {
-  const vegetables = await Vegetable.find();
+  // Fetch only in-stock vegetables
+  const vegetables = await Vegetable.find({ outOfStock: false });
   
   // Transform data to include weight options for frontend dropdown
   const vegetablesWithWeightOptions = vegetables.map(veg => ({
@@ -27,7 +28,7 @@ export const getVegetables = asyncHandler(async (req, res) => {
       { weight: '100g', price: veg.prices.weight100g, marketPrice: veg.marketPrices.weight100g },
     ]
   }));
-  
+
   res.json(new ApiResponse(200, vegetablesWithWeightOptions, "Vegetables fetched successfully"));
 });
 
