@@ -518,7 +518,7 @@ export const getOrders = asyncHandler(async (req, res) => {
     new ApiResponse(
       200,
       {
-        orders,,
+        orders,
       },
       "Orders fetched successfully"
     )
