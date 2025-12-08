@@ -518,13 +518,7 @@ export const getOrders = asyncHandler(async (req, res) => {
     new ApiResponse(
       200,
       {
-        orders,
-        pagination: {
-          currentPage: page,
-          totalPages: Math.ceil(totalOrders / limit),
-          totalOrders,
-          hasMore: page * limit < totalOrders,
-        },
+        orders,,
       },
       "Orders fetched successfully"
     )
