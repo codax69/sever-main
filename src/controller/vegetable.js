@@ -5,12 +5,22 @@ import { asyncHandler } from "../utility/AsyncHandler.js";
 
 // Helper function to calculate prices based on 1kg price
 const calculatePrices = (price1kg) => {
-  const p = parseFloat(price1kg);
+  const p = Number(price1kg);
   return {
     weight1kg: p,
-    weight500g: Math.round((p / 2) * 100) / 100,
-    weight250g: Math.round((p / 4) * 100) / 100,
-    weight100g: Math.round((p / 10) * 100) / 100,
+    weight500g: Number((p * 0.58).toFixed(0)),
+    weight250g: Number((p * 0.36).toFixed(0)),
+    weight100g: Number((p * 0.16).toFixed(0)),
+  };
+};
+
+const calculateMarketPrices = (price1kg) => {
+  const p = Number(price1kg);
+  return {
+    weight1kg: p,
+    weight500g: Number((p * 0.60).toFixed(0)),
+    weight250g: Number((p * 0.40).toFixed(0)),
+    weight100g: Number((p * 0.20).toFixed(0)),
   };
 };
 
@@ -211,7 +221,7 @@ export const updateVegetable = asyncHandler(async (req, res) => {
 
   // Auto-calculate all weight market prices if marketPrice1kg is provided
   if (marketPrice1kg !== undefined) {
-    updateData.marketPrices = calculatePrices(marketPrice1kg);
+    updateData.marketPrices = calculateMarketPrices(marketPrice1kg);
   }
 
   if (stockKg !== undefined) {
