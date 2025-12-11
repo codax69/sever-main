@@ -13,7 +13,7 @@ const vegetableSchema = new mongoose.Schema(
     },
     stockKg: {
       type: Number,
-      required: [true, "Stock quantity is required"],
+      default: 0,
       min: [0, "Stock cannot be negative"],
     },
     outOfStock: {
@@ -29,98 +29,174 @@ const vegetableSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    screenNumber: {
+      type: Number,
+      default: 1,
+    },
+    // Weight-based pricing (required but can be zeros for set-based items)
     prices: {
       weight1kg: {
         type: Number,
-        required: [true, "1kg price is required"],
-        min: [1, "Price must be greater than 0"],
+        default: 0,
+        min: [0, "Price cannot be negative"],
       },
       weight500g: {
         type: Number,
-        required: [true, "500g price is required"],
-        min: [1, "Price must be greater than 0"],
+        default: 0,
+        min: [0, "Price cannot be negative"],
       },
       weight250g: {
         type: Number,
-        required: [true, "250g price is required"],
-        min: [1, "Price must be greater than 0"],
+        default: 0,
+        min: [0, "Price cannot be negative"],
       },
       weight100g: {
         type: Number,
-        required: [true, "100g price is required"],
-        min: [1, "Price must be greater than 0"],
+        default: 0,
+        min: [0, "Price cannot be negative"],
       },
     },
     marketPrices: {
       weight1kg: {
         type: Number,
-        required: [true, "1kg market price is required"],
-        min: [1, "Price must be greater than 0"],
+        default: 0,
+        min: [0, "Price cannot be negative"],
       },
       weight500g: {
         type: Number,
-        required: [true, "500g market price is required"],
-        min: [1, "Price must be greater than 0"],
+        default: 0,
+        min: [0, "Price cannot be negative"],
       },
       weight250g: {
         type: Number,
-        required: [true, "250g market price is required"],
-        min: [1, "Price must be greater than 0"],
+        default: 0,
+        min: [0, "Price cannot be negative"],
       },
       weight100g: {
         type: Number,
-        required: [true, "100g market price is required"],
-        min: [1, "Price must be greater than 0"],
+        default: 0,
+        min: [0, "Price cannot be negative"],
       },
+    },
+    // Set-based pricing (for bundles/pieces)
+    setPricing: {
+      enabled: {
+        type: Boolean,
+        default: false,
+      },
+      sets: [
+        {
+          quantity: {
+            type: Number,
+            min: [1, "Quantity must be at least 1"],
+          },
+          unit: {
+            type: String,
+            enum: ["pieces", "bundles", "sets", "nos"],
+            default: "pieces",
+          },
+          price: {
+            type: Number,
+            min: [0, "Price cannot be negative"],
+          },
+          marketPrice: {
+            type: Number,
+            min: [0, "Market price cannot be negative"],
+          },
+          label: {
+            type: String,
+            trim: true,
+          },
+        },
+      ],
+    },
+    // Stock tracking for piece-based items
+    stockPieces: {
+      type: Number,
+      min: [0, "Stock pieces cannot be negative"],
+      default: 0,
     },
   },
   { timestamps: true }
 );
 
-// Middleware to automatically set outOfStock based on stockKg
-vegetableSchema.pre("save", function (next) {
-  this.outOfStock = this.stockKg === 0;
+// Custom validation: ensure at least one pricing method has valid data
+vegetableSchema.pre("validate", function (next) {
+  if (this.setPricing?.enabled) {
+    // Set pricing mode - require at least one set with valid data
+    if (!this.setPricing.sets || this.setPricing.sets.length === 0) {
+      return next(new Error("At least one set is required when set pricing is enabled"));
+    }
+    // Validate each set has required fields
+    for (const set of this.setPricing.sets) {
+      if (!set.quantity || !set.price || set.quantity <= 0 || set.price <= 0) {
+        return next(new Error("Each set must have valid quantity and price"));
+      }
+    }
+  } else {
+    // Weight pricing mode - require valid prices
+    if (!this.prices?.weight1kg || this.prices.weight1kg <= 0) {
+      return next(new Error("Valid 1kg price is required for weight-based pricing"));
+    }
+    if (!this.marketPrices?.weight1kg || this.marketPrices.weight1kg <= 0) {
+      return next(new Error("Valid 1kg market price is required for weight-based pricing"));
+    }
+  }
   next();
 });
 
+// Middleware to automatically set outOfStock based on stockKg or stockPieces
+vegetableSchema.pre("save", function (next) {
+  if (this.setPricing?.enabled) {
+    // For set-based pricing, check stockPieces
+    this.outOfStock = this.stockPieces === 0;
+  } else {
+    // For weight-based pricing, check stockKg
+    this.outOfStock = this.stockKg < 0.25;
+  }
+  next();
+});
+
+// Handle findOneAndUpdate operations
+vegetableSchema.pre("findOneAndUpdate", async function (next) {
+  const update = this.getUpdate();
+  
+  if (!update.$set) {
+    return next();
+  }
+
+  // Determine pricing mode after update
+  let usingSetPricing = false;
+  if (update.$set.setPricing?.enabled !== undefined) {
+    usingSetPricing = update.$set.setPricing.enabled;
+  } else {
+    const docToUpdate = await this.model.findOne(this.getQuery());
+    if (docToUpdate) {
+      usingSetPricing = docToUpdate.setPricing?.enabled === true;
+    }
+  }
+
+  // Set outOfStock based on pricing mode
+  if (usingSetPricing) {
+    if (update.$set.stockPieces !== undefined) {
+      update.$set.outOfStock = update.$set.stockPieces === 0;
+    }
+  } else {
+    if (update.$set.stockKg !== undefined) {
+      update.$set.outOfStock = update.$set.stockKg < 0.25;
+    }
+  }
+
+  next();
+});
+
+// Virtual for default price (1kg weight-based)
 vegetableSchema.virtual("price").get(function () {
-  return this.prices.weight1kg;
+  return this.prices?.weight1kg || 0;
 });
 
 vegetableSchema.virtual("marketPrice").get(function () {
-  return this.marketPrices.weight1kg;
-});
-// In your Vegetable model file (e.g., vegetable.js)
-
-vegetableSchema.pre('save', function(next) {
-  // Automatically set outOfStock based on stockKg
-  if (this.stockKg < 0.25) {
-    this.outOfStock = true;
-  } else {
-    this.outOfStock = false;
-  }
-  next();
-});
-
-// Also handle findOneAndUpdate operations
-vegetableSchema.pre('findOneAndUpdate', async function(next) {
-  const update = this.getUpdate();
-  
-  // Check if stockKg is being updated
-  if (update.$inc && update.$inc.stockKg !== undefined) {
-    const docToUpdate = await this.model.findOne(this.getQuery());
-    const newStockKg = docToUpdate.stockKg + update.$inc.stockKg;
-    
-    if (newStockKg < 0.25) {
-      update.$set = update.$set || {};
-      update.$set.outOfStock = true;
-    } else {
-      update.$set = update.$set || {};
-      update.$set.outOfStock = false;
-    }
-  }
-  
-  next();
+  return this.marketPrices?.weight1kg || 0;
 });
 
 const Vegetable = mongoose.model("Vegetable", vegetableSchema);

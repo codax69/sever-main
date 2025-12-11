@@ -35,9 +35,17 @@ const orderSchema = new mongoose.Schema(
         },
         weight: {
           type: String,
-          enum: ["1kg", "500g", "250g", "100g"],
           required: true,
-          default: "1kg",
+          // REMOVED enum constraint to support both weight and set formats
+          validate: {
+            validator: function (v) {
+              // Allow weight formats: 1kg, 500g, 250g, 100g, etc.
+              // Allow set formats: set0, set1, set2, etc.
+              return /^\d+(kg|g)$/.test(v) || /^set\d+$/.test(v);
+            },
+            message: (props) =>
+              `${props.value} is not a valid weight (e.g., 1kg, 500g) or set format (e.g., set0, set1)!`,
+          },
         },
         quantity: {
           type: Number,
@@ -45,7 +53,7 @@ const orderSchema = new mongoose.Schema(
           min: [1, "Quantity must be at least 1"],
           default: 1,
         },
-        // Price per unit (based on weight)
+        // Price per unit (based on weight or set)
         pricePerUnit: {
           type: Number,
           required: true,
@@ -61,6 +69,22 @@ const orderSchema = new mongoose.Schema(
         isFromBasket: {
           type: Boolean,
           default: false,
+        },
+        // NEW: Fields for set-based pricing
+        setIndex: {
+          type: Number,
+          min: 0,
+        },
+        setLabel: {
+          type: String,
+        },
+        setQuantity: {
+          type: Number,
+          min: 1,
+        },
+        setUnit: {
+          type: String,
+          enum: ["pieces", "bundles", "sets", "nos"],
         },
       },
     ],
@@ -85,12 +109,19 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // ===== NEW: COUPON FIELDS =====
+    // ===== COUPON FIELDS =====
     // Coupon code applied to the order
     couponCode: {
       type: String,
       uppercase: true,
       trim: true,
+      default: null,
+    },
+
+    // Reference to the coupon document
+    couponId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Coupon",
       default: null,
     },
 
@@ -167,6 +198,12 @@ const orderSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+
+    // NEW: Stock updates log for tracking
+    stockUpdates: {
+      type: Array,
+      default: [],
+    },
   },
   { timestamps: true }
 );
@@ -180,12 +217,12 @@ orderSchema.virtual("uniqueVegetablesCount").get(function () {
   return this.selectedVegetables.length;
 });
 
-// NEW: Virtual to check if coupon was applied
+// Virtual to check if coupon was applied
 orderSchema.virtual("hasCoupon").get(function () {
   return this.couponDiscount > 0 && this.couponCode != null;
 });
 
-// NEW: Virtual to calculate total savings
+// Virtual to calculate total savings
 orderSchema.virtual("totalSavings").get(function () {
   let savings = this.couponDiscount || 0;
 
@@ -216,12 +253,12 @@ orderSchema.pre("save", function (next) {
     }
   }
 
-  // NEW: Validate coupon discount
+  // Validate coupon discount
   if (this.couponDiscount < 0) {
     return next(new Error("Coupon discount cannot be negative"));
   }
 
-  // NEW: Validate subtotalAfterDiscount calculation
+  // Validate subtotalAfterDiscount calculation
   let expectedSubtotal;
   if (this.orderType === "basket") {
     expectedSubtotal = this.offerPrice - this.couponDiscount;
@@ -255,7 +292,8 @@ orderSchema.pre("save", function (next) {
 orderSchema.index({ customerInfo: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1 });
 orderSchema.index({ orderType: 1 });
-orderSchema.index({ couponCode: 1 }); // NEW: Index for coupon queries
+orderSchema.index({ couponCode: 1 });
+orderSchema.index({ orderDate: 1 });
 
 orderSchema.set("toJSON", { virtuals: true });
 orderSchema.set("toObject", { virtuals: true });

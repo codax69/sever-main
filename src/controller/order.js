@@ -17,13 +17,97 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_SECRET,
 });
 
-// Fixed: Moved weightMap to module scope and fixed function logic
-const weightMap = {
-  "1kg": "weight1kg",
-  "500g": "weight500g",
-  "250g": "weight250g",
-  "100g": "weight100g",
-};
+// ============================================================================
+// PRICING HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Get price for set-based pricing
+ */
+function getPriceForSet(vegetable, setIndex) {
+  if (!vegetable.setPricing?.enabled || !vegetable.setPricing?.sets) {
+    throw new Error(
+      `Vegetable ${vegetable.name} does not have set pricing enabled`
+    );
+  }
+
+  const setOption = vegetable.setPricing.sets[setIndex];
+
+  if (!setOption) {
+    throw new Error(
+      `Invalid set index: ${setIndex}. Available sets: 0-${vegetable.setPricing.sets.length - 1}`
+    );
+  }
+
+  return {
+    price: setOption.price,
+    quantity: setOption.quantity,
+    unit: setOption.unit,
+    label: `${setOption.quantity} ${setOption.unit}`,
+  };
+}
+
+/**
+ * Get price for weight-based pricing
+ */
+function getPriceForWeight(vegetable, weight) {
+  const weightMap = {
+    "1kg": "weight1kg",
+    "500g": "weight500g",
+    "250g": "weight250g",
+    "100g": "weight100g",
+  };
+
+  const priceKey = weightMap[weight];
+  if (!priceKey || !vegetable.prices?.[priceKey]) {
+    throw new Error(
+      `Invalid weight: ${weight}. Must be one of: 1kg, 500g, 250g, 100g`
+    );
+  }
+  return vegetable.prices[priceKey];
+}
+
+/**
+ * Get price based on vegetable's pricing type
+ */
+function getPrice(vegetable, weightOrSet, quantity = 1) {
+  if (vegetable.pricingType === "set" || vegetable.setPricing?.enabled) {
+    // Handle set-based pricing
+    const setIndex = weightOrSet.startsWith("set")
+      ? parseInt(weightOrSet.replace("set", ""))
+      : parseInt(weightOrSet);
+
+    const setInfo = getPriceForSet(vegetable, setIndex);
+
+    return {
+      type: "set",
+      pricePerUnit: setInfo.price,
+      subtotal: setInfo.price * quantity,
+      label: setInfo.label,
+      setIndex,
+      setQuantity: setInfo.quantity,
+      setUnit: setInfo.unit,
+    };
+  } else {
+    // Handle weight-based pricing
+    const pricePerUnit = getPriceForWeight(vegetable, weightOrSet);
+
+    return {
+      type: "weight",
+      pricePerUnit,
+      subtotal: pricePerUnit * quantity,
+      weight: weightOrSet,
+    };
+  }
+}
+
+// ============================================================================
+// STOCK CALCULATION FUNCTIONS
+// ============================================================================
+
+/**
+ * Calculate kg from weight for stock deduction (weight-based only)
+ */
 function calculateKgFromWeight(weight, quantity) {
   const weightToKg = {
     "1kg": 1,
@@ -31,103 +115,182 @@ function calculateKgFromWeight(weight, quantity) {
     "250g": 0.25,
     "100g": 0.1,
   };
-  
+
   return weightToKg[weight] * quantity;
 }
 
 /**
- * Deduct stock for ordered vegetables
+ * Calculate pieces from set for stock deduction (set-based only)
+ */
+function calculatePiecesFromSet(vegetable, setIndex, quantity) {
+  const setOption = vegetable.setPricing.sets[setIndex];
+  if (!setOption) {
+    throw new Error(`Invalid set index: ${setIndex}`);
+  }
+
+  return setOption.quantity * quantity;
+}
+
+/**
+ * Deduct stock for ordered vegetables (handles both weight and set pricing)
  */
 async function deductVegetableStock(selectedVegetables) {
   const stockUpdates = [];
-  
+
   for (const item of selectedVegetables) {
-    const kgToDeduct = calculateKgFromWeight(item.weight, item.quantity);
-    
     const vegetable = await Vegetable.findById(item.vegetable);
-    
+
     if (!vegetable) {
       throw new Error(`Vegetable not found: ${item.vegetable}`);
     }
-    
-    // Check if sufficient stock is available
-    if (vegetable.stockKg < kgToDeduct) {
-      throw new Error(
-        `Insufficient stock for ${vegetable.name}. Available: ${vegetable.stockKg}kg, Required: ${kgToDeduct}kg`
+
+    if (vegetable.pricingType === "set" || vegetable.setPricing?.enabled) {
+      // Handle set-based stock
+      const setIndex =
+        item.setIndex ?? parseInt(item.weight?.replace("set", "") || "0");
+      const piecesToDeduct = calculatePiecesFromSet(
+        vegetable,
+        setIndex,
+        item.quantity
       );
+
+      if (vegetable.stockPieces < piecesToDeduct) {
+        throw new Error(
+          `Insufficient stock for ${vegetable.name}. Available: ${vegetable.stockPieces} pieces, Required: ${piecesToDeduct} pieces`
+        );
+      }
+
+      stockUpdates.push({
+        vegetableId: item.vegetable,
+        vegetableName: vegetable.name,
+        deducted: piecesToDeduct,
+        previousStock: vegetable.stockPieces,
+        type: "pieces",
+      });
+    } else {
+      // Handle weight-based stock
+      const kgToDeduct = calculateKgFromWeight(item.weight, item.quantity);
+
+      if (vegetable.stockKg < kgToDeduct) {
+        throw new Error(
+          `Insufficient stock for ${vegetable.name}. Available: ${vegetable.stockKg}kg, Required: ${kgToDeduct}kg`
+        );
+      }
+
+      stockUpdates.push({
+        vegetableId: item.vegetable,
+        vegetableName: vegetable.name,
+        deducted: kgToDeduct,
+        previousStock: vegetable.stockKg,
+        type: "kg",
+      });
     }
-    
-    stockUpdates.push({
-      vegetableId: item.vegetable,
-      vegetableName: vegetable.name,
-      deducted: kgToDeduct,
-      previousStock: vegetable.stockKg,
-    });
   }
-  
+
   // If all checks pass, update all stocks
   for (const update of stockUpdates) {
-    const updatedVeg = await Vegetable.findByIdAndUpdate(
-      update.vegetableId,
-      { $inc: { stockKg: -update.deducted } },
-      { new: true }
-    );
-    
-    // ✅ Auto-set outOfStock if below 0.25kg
-    if (updatedVeg.stockKg < 0.25) {
-      await Vegetable.findByIdAndUpdate(
+    if (update.type === "pieces") {
+      const updatedVeg = await Vegetable.findByIdAndUpdate(
         update.vegetableId,
-        { $set: { outOfStock: true } }
+        { $inc: { stockPieces: -update.deducted } },
+        { new: true }
       );
+
+      if (updatedVeg.stockPieces <= 0) {
+        await Vegetable.findByIdAndUpdate(update.vegetableId, {
+          $set: { outOfStock: true },
+        });
+      }
+    } else {
+      const updatedVeg = await Vegetable.findByIdAndUpdate(
+        update.vegetableId,
+        { $inc: { stockKg: -update.deducted } },
+        { new: true }
+      );
+
+      if (updatedVeg.stockKg < 0.25) {
+        await Vegetable.findByIdAndUpdate(update.vegetableId, {
+          $set: { outOfStock: true },
+        });
+      }
     }
   }
-  
+
   return stockUpdates;
 }
 
 /**
- * Restore stock for cancelled vegetables
+ * Restore stock for cancelled vegetables (handles both weight and set pricing)
  */
 async function restoreVegetableStock(selectedVegetables) {
   const stockUpdates = [];
-  
+
   for (const item of selectedVegetables) {
-    const kgToRestore = calculateKgFromWeight(item.weight, item.quantity);
-    
-    const vegetable = await Vegetable.findByIdAndUpdate(
-      item.vegetable,
-      { $inc: { stockKg: kgToRestore } },
-      { new: true }
-    );
-    
-    if (vegetable) {
-      // ✅ Auto-set outOfStock to false if stock is restored above 0.25kg
-      if (vegetable.stockKg >= 0.25) {
-        await Vegetable.findByIdAndUpdate(
-          item.vegetable,
-          { $set: { outOfStock: false } }
-        );
+    const vegetable = await Vegetable.findById(item.vegetable);
+
+    if (!vegetable) continue;
+
+    if (vegetable.pricingType === "set" || vegetable.setPricing?.enabled) {
+      // Handle set-based stock restoration
+      const setIndex =
+        item.setIndex ?? parseInt(item.weight?.replace("set", "") || "0");
+      const piecesToRestore = calculatePiecesFromSet(
+        vegetable,
+        setIndex,
+        item.quantity
+      );
+
+      const updatedVeg = await Vegetable.findByIdAndUpdate(
+        item.vegetable,
+        { $inc: { stockPieces: piecesToRestore } },
+        { new: true }
+      );
+
+      if (updatedVeg && updatedVeg.stockPieces > 0) {
+        await Vegetable.findByIdAndUpdate(item.vegetable, {
+          $set: { outOfStock: false },
+        });
       }
-      
+
+      stockUpdates.push({
+        vegetableId: item.vegetable,
+        vegetableName: vegetable.name,
+        restored: piecesToRestore,
+        newStock: updatedVeg.stockPieces,
+        type: "pieces",
+      });
+    } else {
+      // Handle weight-based stock restoration
+      const kgToRestore = calculateKgFromWeight(item.weight, item.quantity);
+
+      const updatedVeg = await Vegetable.findByIdAndUpdate(
+        item.vegetable,
+        { $inc: { stockKg: kgToRestore } },
+        { new: true }
+      );
+
+      if (updatedVeg && updatedVeg.stockKg >= 0.25) {
+        await Vegetable.findByIdAndUpdate(item.vegetable, {
+          $set: { outOfStock: false },
+        });
+      }
+
       stockUpdates.push({
         vegetableId: item.vegetable,
         vegetableName: vegetable.name,
         restored: kgToRestore,
-        newStock: vegetable.stockKg,
+        newStock: updatedVeg.stockKg,
+        type: "kg",
       });
     }
   }
-  
+
   return stockUpdates;
 }
 
-function getPriceForWeight(vegetable, weight) {
-  const priceKey = weightMap[weight];
-  if (!priceKey || !vegetable.prices?.[priceKey]) {
-    throw new Error(`Invalid weight: ${weight}`);
-  }
-  return vegetable.prices[priceKey];
-}
+// ============================================================================
+// ORDER PROCESSING HELPER FUNCTIONS
+// ============================================================================
 
 async function processCustomer(customerInfo) {
   if (typeof customerInfo === "string") {
@@ -244,6 +407,9 @@ function getVegetableIdentifier(item) {
   return item._id || item.id || item.name;
 }
 
+/**
+ * Process vegetables for order (handles both weight and set pricing)
+ */
 async function processVegetables(selectedVegetables, isFromBasket = false) {
   if (!Array.isArray(selectedVegetables) || selectedVegetables.length === 0) {
     throw new Error("selectedVegetables must be a non-empty array");
@@ -296,32 +462,37 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
       throw new Error(`Vegetable not found: ${identifier}`);
     }
 
-    const weight = (typeof item === "object" && item?.weight) || "1kg";
+    const weightOrSet = (typeof item === "object" && item?.weight) || "1kg";
     const quantity = (typeof item === "object" && item?.quantity) || 1;
 
-    const validWeights = ["1kg", "500g", "250g", "100g"];
-    if (!validWeights.includes(weight)) {
-      throw new Error(
-        `Invalid weight: ${weight}. Must be one of: ${validWeights.join(", ")}`
-      );
-    }
-
-    const groupKey = `${vegetable._id.toString()}_${weight}`;
+    const groupKey = `${vegetable._id.toString()}_${weightOrSet}`;
 
     if (groupedItems.has(groupKey)) {
       const existing = groupedItems.get(groupKey);
       existing.quantity += quantity;
       existing.subtotal = existing.pricePerUnit * existing.quantity;
     } else {
-      const price = getPriceForWeight(vegetable, weight);
-      groupedItems.set(groupKey, {
+      const priceInfo = getPrice(vegetable, weightOrSet, quantity);
+
+      const itemData = {
         vegetable: vegetable._id,
-        weight,
         quantity,
-        pricePerUnit: price,
-        subtotal: price * quantity,
+        pricePerUnit: priceInfo.pricePerUnit,
+        subtotal: priceInfo.subtotal,
         isFromBasket,
-      });
+      };
+
+      if (priceInfo.type === "set") {
+        itemData.weight = weightOrSet; // Store original "set0", "set1", etc.
+        itemData.setIndex = priceInfo.setIndex;
+        itemData.setLabel = priceInfo.label;
+        itemData.setQuantity = priceInfo.setQuantity;
+        itemData.setUnit = priceInfo.setUnit;
+      } else {
+        itemData.weight = priceInfo.weight;
+      }
+
+      groupedItems.set(groupKey, itemData);
     }
   });
 
@@ -398,7 +569,6 @@ function calculateOrderTotal(
   };
 }
 
-// Fixed: Centralized coupon validation function
 async function validateAndApplyCoupon(couponCode, subtotal, customerId = null) {
   if (!couponCode) {
     return {
@@ -466,6 +636,10 @@ async function validateAndApplyCoupon(couponCode, subtotal, customerId = null) {
   }
 }
 
+// ============================================================================
+// EXPORTED CONTROLLER FUNCTIONS
+// ============================================================================
+
 export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
   try {
     const startOfDay = new Date();
@@ -494,8 +668,8 @@ export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
 });
 
 export const getOrders = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page) ;
-  const limit = parseInt(req.query.limit) ;
+  const page = parseInt(req.query.page);
+  const limit = parseInt(req.query.limit);
   const skip = (page - 1) * limit;
 
   const filter = {};
@@ -576,18 +750,18 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
 
   // Get the current order
   const currentOrder = await Order.findById(_id);
-  
+
   if (!currentOrder) {
     return res.status(404).json(new ApiResponse(404, null, "Order not found"));
   }
 
-  // ✅ If order is being cancelled, restore stock
+  // If order is being cancelled, restore stock
   if (orderStatus === "cancelled" && currentOrder.orderStatus !== "cancelled") {
     try {
       const stockUpdates = await restoreVegetableStock(
         currentOrder.selectedVegetables
       );
-      console.log("Stock restored for cancelled order:", stockUpdates);
+      // console.log("Stock restored for cancelled order:", stockUpdates);
     } catch (error) {
       console.error("Error restoring stock:", error.message);
       // Continue with cancellation even if stock restore fails
@@ -738,7 +912,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     const offer = await Offer.findById(offerId);
     const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
     const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
-    
+
     totals = {
       vegetablesTotal: 0,
       offerPrice: offer.price,
@@ -758,7 +932,7 @@ export const addOrder = asyncHandler(async (req, res) => {
 
   // Handle COD payment
   if (paymentMethod === "COD") {
-    // ✅ Deduct stock before creating order
+    // Deduct stock before creating order
     let stockUpdates;
     try {
       stockUpdates = await deductVegetableStock(processedVegetables);
@@ -778,7 +952,7 @@ export const addOrder = asyncHandler(async (req, res) => {
       paymentMethod: "COD",
       paymentStatus: "pending",
       orderStatus: "placed",
-      stockUpdates, // Store stock update info
+      stockUpdates,
     };
 
     if (orderType === "basket") {
@@ -838,7 +1012,6 @@ export const addOrder = asyncHandler(async (req, res) => {
   );
 });
 
-// ✅ UPDATED: Modified verifyPayment to handle basket orders correctly
 export const verifyPayment = asyncHandler(async (req, res) => {
   const {
     razorpay_order_id,
@@ -959,7 +1132,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     const offer = await Offer.findById(offerId);
     const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
     const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
-    
+
     totals = {
       vegetablesTotal: 0,
       offerPrice: offer.price,
@@ -977,21 +1150,22 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     );
   }
 
-  // ✅ Deduct stock after successful payment
+  // Deduct stock after successful payment
   let stockUpdates;
   try {
     stockUpdates = await deductVegetableStock(processedVegetables);
   } catch (error) {
     // Payment succeeded but stock insufficient - critical situation
-    // You might want to handle this differently (e.g., notify admin, refund)
     console.error("Stock deduction failed after payment:", error.message);
-    return res.status(500).json(
-      new ApiResponse(
-        500,
-        null,
-        "Payment successful but stock unavailable. Please contact support."
-      )
-    );
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Payment successful but stock unavailable. Please contact support."
+        )
+      );
   }
 
   // Create order
@@ -1009,7 +1183,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     paymentStatus: "completed",
     razorpayOrderId: razorpay_order_id,
     razorpayPaymentId: razorpay_payment_id,
-    stockUpdates, // Store stock update info
+    stockUpdates,
   };
 
   if (orderType === "basket") {
@@ -1036,7 +1210,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     )
   );
 });
-
 
 export const deleteOrder = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -1105,7 +1278,6 @@ export const getRazorpayKey = asyncHandler(async (req, res) => {
 
 export const calculatePrice = asyncHandler(async (req, res) => {
   const { items, couponCode } = req.body;
-  // console.log({ items, couponCode });
 
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new ApiError(400, "Items array is required and cannot be empty");
@@ -1114,7 +1286,6 @@ export const calculatePrice = asyncHandler(async (req, res) => {
   let subtotal = 0;
   const calculatedItems = [];
 
-  // Calculate items subtotal
   for (const item of items) {
     if (!item.vegetableId || !item.weight || !item.quantity) {
       throw new ApiError(
@@ -1132,19 +1303,35 @@ export const calculatePrice = asyncHandler(async (req, res) => {
       throw new ApiError(404, `Vegetable not found: ${item.vegetableId}`);
     }
 
-    const pricePerUnit = getPriceForWeight(vegetable, item.weight);
-    const itemSubtotal = pricePerUnit * item.quantity;
+    try {
+      const priceInfo = getPrice(vegetable, item.weight, item.quantity);
 
-    calculatedItems.push({
-      vegetableId: item.vegetableId,
-      name: vegetable.name,
-      weight: item.weight,
-      quantity: item.quantity,
-      pricePerUnit,
-      subtotal: itemSubtotal,
-    });
+      const calculatedItem = {
+        vegetableId: item.vegetableId,
+        name: vegetable.name,
+        pricingType: vegetable.pricingType,
+        quantity: item.quantity,
+        pricePerUnit: priceInfo.pricePerUnit,
+        subtotal: priceInfo.subtotal,
+      };
 
-    subtotal += itemSubtotal;
+      if (priceInfo.type === "set") {
+        calculatedItem.weight = item.weight; // "set0", "set1", etc.
+        calculatedItem.setLabel = priceInfo.label;
+        calculatedItem.setQuantity = priceInfo.setQuantity;
+        calculatedItem.setUnit = priceInfo.setUnit;
+      } else {
+        calculatedItem.weight = priceInfo.weight;
+      }
+
+      calculatedItems.push(calculatedItem);
+      subtotal += priceInfo.subtotal;
+    } catch (error) {
+      throw new ApiError(
+        400,
+        `Error processing ${vegetable.name}: ${error.message}`
+      );
+    }
   }
 
   // Apply coupon discount (non-blocking)
@@ -1156,13 +1343,12 @@ export const calculatePrice = asyncHandler(async (req, res) => {
       const couponValidation = await validateAndApplyCoupon(
         couponCode,
         subtotal,
-        null // No customer ID for price calculation
+        null
       );
 
       couponDiscount = couponValidation.couponDiscount;
       couponDetails = couponValidation.couponDetails;
     } catch (error) {
-      // Return error details for invalid coupon
       couponDetails = {
         code: couponCode,
         applied: false,
@@ -1207,6 +1393,7 @@ export const calculatePrice = asyncHandler(async (req, res) => {
     )
   );
 });
+
 export const validateCouponForBasket = asyncHandler(async (req, res) => {
   const { offerId, offerPrice, couponCode } = req.body;
 
@@ -1283,7 +1470,7 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
   // Calculate final amounts
   const subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
 
-  // Basket orders always have fixed delivery charge of ₹20
+  // Basket orders always have fixed delivery charge
   const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
   const totalAmount = subtotalAfterDiscount + deliveryChargesInRupees;
 
@@ -1302,3 +1489,182 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
     )
   );
 });
+export const getOrdersByDateTimeRange = async (req, res) => {
+  try {
+    const { startDate, startTime, endDate, endTime } = req.query;
+
+    // console.log('Received params:', { startDate, startTime, endDate, endTime });
+
+    // Validate required parameters
+    if (!startDate || !startTime || !endDate || !endTime) {
+      return res.status(400).json({
+        success: false,
+        message: "startDate, startTime, endDate, and endTime are required",
+        example: "?startDate=2024-01-15&startTime=09:00&endDate=2024-01-20&endTime=18:00"
+      });
+    }
+
+    // Create start and end datetime objects
+    // Format: YYYY-MM-DDTHH:MM:SS
+    const startDateTime = new Date(`${startDate}T${startTime}:00`);
+    const endDateTime = new Date(`${endDate}T${endTime}:00`);
+
+    // console.log('DateTime range:', { startDateTime, endDateTime });
+
+    // Validate dates
+    if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date or time format",
+        example: "startDate: YYYY-MM-DD, startTime: HH:MM"
+      });
+    }
+
+    if (startDateTime > endDateTime) {
+      return res.status(400).json({
+        success: false,
+        message: "Start date-time cannot be after end date-time"
+      });
+    }
+
+    // Fetch orders within the date-time range
+    // Exclude orders that are delivered or cancelled
+    const orders = await Order.find({
+      orderDate: {
+        $gte: startDateTime,
+        $lte: endDateTime
+      },
+      orderStatus: {
+        $nin: ['delivered', 'cancelled', 'Delivered', 'Cancelled']
+      }
+    }).populate('customerInfo').populate('selectedVegetables.vegetable');
+
+    // console.log(`Found ${orders.length} orders`);
+
+    if (!orders || orders.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No orders found in the specified date-time range",
+        data: {
+          orders: [],
+          totalOrders: 0,
+          dateTimeRange: {
+            start: startDateTime,
+            end: endDateTime
+          },
+          summary: {
+            totalOrders: 0,
+            totalRevenue: 0,
+            totalVegetablesWeight: 0,
+            uniqueVegetables: 0
+          },
+          vegetableWeights: {}
+        }
+      });
+    }
+
+    // Calculate vegetable weights
+    const vegetableWeights = {};
+    
+    orders.forEach(order => {
+      order.selectedVegetables.forEach(item => {
+        const vegetableName = item.vegetable?.name || 'Unknown Vegetable';
+        const weight = item.weight; // e.g., "1kg", "500g", "250g"
+        const quantity = item.quantity;
+
+        // Convert weight to kg
+        let weightInKg = 0;
+        if (weight.includes('kg')) {
+          weightInKg = parseFloat(weight) * quantity;
+        } else if (weight.includes('g')) {
+          weightInKg = (parseFloat(weight) / 1000) * quantity;
+        }
+
+        // Initialize vegetable entry if it doesn't exist
+        if (!vegetableWeights[vegetableName]) {
+          vegetableWeights[vegetableName] = {
+            totalWeightKg: 0,
+            totalWeightG: 0,
+            orders: 0,
+            breakdown: []
+          };
+        }
+
+        // Add to total weight
+        vegetableWeights[vegetableName].totalWeightKg += weightInKg;
+        vegetableWeights[vegetableName].orders += 1;
+        
+        // Add breakdown details
+        vegetableWeights[vegetableName].breakdown.push({
+          orderId: order.orderId,
+          weight: weight,
+          quantity: quantity,
+          totalWeight: `${weightInKg}kg`,
+          customerName: order.customerInfo?.name || 'Unknown',
+          orderDate: order.orderDate
+        });
+      });
+    });
+
+    // Convert kg to g for better readability
+    Object.keys(vegetableWeights).forEach(vegName => {
+      const totalKg = vegetableWeights[vegName].totalWeightKg;
+      vegetableWeights[vegName].totalWeightG = Math.round(totalKg * 1000);
+      vegetableWeights[vegName].totalWeightKg = Math.round(totalKg * 100) / 100; // Round to 2 decimals
+    });
+
+    // Calculate summary statistics
+    const summary = {
+      totalOrders: orders.length,
+      totalRevenue: orders.reduce((sum, order) => sum + (order.totalAmount || 0), 0),
+      totalVegetablesWeight: Object.values(vegetableWeights).reduce(
+        (sum, veg) => sum + veg.totalWeightKg, 0
+      ),
+      uniqueVegetables: Object.keys(vegetableWeights).length,
+      dateRange: {
+        from: startDate,
+        to: endDate
+      },
+      timeRange: {
+        from: startTime,
+        to: endTime
+      }
+    };
+
+    return res.status(200).json({
+      success: true,
+      message: "Orders retrieved successfully",
+      data: {
+        dateTimeRange: {
+          start: startDateTime,
+          end: endDateTime
+        },
+        summary,
+        vegetableWeights,
+        orders: orders.map(order => ({
+          _id: order._id,
+          orderId: order.orderId,
+          customerName: order.customerInfo?.name,
+          orderDate: order.orderDate,
+          totalAmount: order.totalAmount,
+          paymentStatus: order.paymentStatus,
+          orderStatus: order.orderStatus,
+          vegetables: order.selectedVegetables.map(item => ({
+            name: item.vegetable?.name || 'Unknown',
+            weight: item.weight,
+            quantity: item.quantity,
+            subtotal: item.subtotal
+          }))
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error("Error fetching orders by date-time range:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch orders",
+      error: error.message
+    });
+  }
+};

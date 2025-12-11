@@ -1,7 +1,6 @@
 import Vegetable from "../Model/vegetable.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
-// import { uploadToCloudinary } from "../utility/cloudinary.js";
 
 // Helper function to calculate prices based on 1kg price
 const calculatePrices = (price1kg) => {
@@ -24,261 +23,371 @@ const calculateMarketPrices = (price1kg) => {
   };
 };
 
+// Helper to format vegetable data with options
+const formatVegetableWithOptions = (veg) => {
+  const vegObject = veg.toObject();
+  
+  // Check if set pricing is enabled
+  if (vegObject.setPricing?.enabled && vegObject.setPricing.sets?.length > 0) {
+    return {
+      ...vegObject,
+      pricingType: 'set',
+      setOptions: vegObject.setPricing.sets.map(set => ({
+        quantity: set.quantity,
+        unit: set.unit,
+        price: set.price,
+        marketPrice: set.marketPrice,
+        label: set.label || `${set.quantity} ${set.unit}`,
+      })),
+    };
+  }
+  
+  // Weight-based pricing
+  return {
+    ...vegObject,
+    pricingType: 'weight',
+    weightOptions: [
+      { weight: '1kg', price: vegObject.prices.weight1kg, marketPrice: vegObject.marketPrices.weight1kg },
+      { weight: '500g', price: vegObject.prices.weight500g, marketPrice: vegObject.marketPrices.weight500g },
+      { weight: '250g', price: vegObject.prices.weight250g, marketPrice: vegObject.marketPrices.weight250g },
+      { weight: '100g', price: vegObject.prices.weight100g, marketPrice: vegObject.marketPrices.weight100g },
+    ],
+  };
+};
+
 export const getVegetables = asyncHandler(async (req, res) => {
   const vegetables = await Vegetable.find();
-  
-  // Transform data to include weight options for frontend dropdown
-  const vegetablesWithWeightOptions = vegetables.map(veg => ({
-    ...veg.toObject(),
-    weightOptions: [
-      { weight: '1kg', price: veg.prices.weight1kg, marketPrice: veg.marketPrices.weight1kg },
-      { weight: '500g', price: veg.prices.weight500g, marketPrice: veg.marketPrices.weight500g },
-      { weight: '250g', price: veg.prices.weight250g, marketPrice: veg.marketPrices.weight250g },
-      { weight: '100g', price: veg.prices.weight100g, marketPrice: veg.marketPrices.weight100g },
-    ]
-  }));
-  
-  res.json(new ApiResponse(200, vegetablesWithWeightOptions, "Vegetables fetched successfully"));
+  const vegetablesWithOptions = vegetables.map(veg => formatVegetableWithOptions(veg));
+  res.json(new ApiResponse(200, vegetablesWithOptions, "Vegetables fetched successfully"));
 });
-
-
 
 export const getVegetableById = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const vegetable = await Vegetable.findById(id);
+  
   if (!vegetable) {
-    return res
-      .status(404)
-      .json(new ApiResponse(404, null, "Vegetable not found"));
+    return res.status(404).json(new ApiResponse(404, null, "Vegetable not found"));
   }
   
-  // Add weight options for dropdown
-  const vegetableWithWeightOptions = {
-    ...vegetable.toObject(),
-    weightOptions: [
-      { weight: '1kg', price: vegetable.prices.weight1kg, marketPrice: vegetable.marketPrices.weight1kg },
-      { weight: '500g', price: vegetable.prices.weight500g, marketPrice: vegetable.marketPrices.weight500g },
-      { weight: '250g', price: vegetable.prices.weight250g, marketPrice: vegetable.marketPrices.weight250g },
-      { weight: '100g', price: vegetable.prices.weight100g, marketPrice: vegetable.marketPrices.weight100g },
-    ]
-  };
-  
-  res.json(new ApiResponse(200, vegetableWithWeightOptions, "Vegetable fetched successfully"));
+  const vegetableWithOptions = formatVegetableWithOptions(vegetable);
+  res.json(new ApiResponse(200, vegetableWithOptions, "Vegetable fetched successfully"));
 });
 
 export const addVegetable = asyncHandler(async (req, res) => {
   const {
     screenNumber,
-    price1kg,        // Single input field for VegBazar 1kg price
-    marketPrice1kg,  // Single input field for Market 1kg price
+    price1kg,
+    marketPrice1kg,
     offer,
     description,
     stockKg,
     image,
     name,
+    setPricingEnabled,
+    sets,
+    stockPieces,
   } = req.body;
 
-  // Validation
-  if (!name || !price1kg || !marketPrice1kg || stockKg === undefined) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(
-          400,
-          null,
-          "Missing required fields: name, price1kg, marketPrice1kg, stockKg"
-        )
-      );
+  if (!name) {
+    return res.status(400).json(new ApiResponse(400, null, "Name is required"));
   }
 
-  // Validate 1kg price
-  if (isNaN(price1kg) || parseFloat(price1kg) <= 0) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "VegBazar price must be a valid positive number")
-      );
-  }
-
-  // Validate market 1kg price
-  if (isNaN(marketPrice1kg) || parseFloat(marketPrice1kg) <= 0) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "Market price must be a valid positive number")
-      );
-  }
-
-  // Allow 0 stock but must be a valid number
-  if (isNaN(stockKg) || parseFloat(stockKg) < 0) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "Stock must be a valid non-negative number")
-      );
-  }
-
-  const stockValue = parseFloat(stockKg);
-
-  // Auto-calculate all weight prices
-  const prices = calculatePrices(price1kg);
-  const marketPrices = calculatePrices(marketPrice1kg);
-
-  const vegetable = new Vegetable({
+  const vegetableData = {
+    name,
+    image,
     screenNumber,
-    prices,
-    marketPrices,
     offer,
     description,
-    stockKg: stockValue,
-    outOfStock: stockValue === 0, // Set outOfStock based on stockKg
-    image,
-    name,
-  });
+  };
 
+  // SET-BASED PRICING MODE
+  if (setPricingEnabled === true) {
+    if (!sets || !Array.isArray(sets) || sets.length === 0) {
+      return res.status(400).json(new ApiResponse(400, null, "Sets array is required for set pricing"));
+    }
+
+    if (stockPieces === undefined || isNaN(stockPieces) || parseFloat(stockPieces) < 0) {
+      return res.status(400).json(new ApiResponse(400, null, "Valid stockPieces is required for set pricing"));
+    }
+
+    // Validate each set
+    for (const set of sets) {
+      if (set.quantity === undefined || set.price === undefined) {
+        return res.status(400).json(new ApiResponse(400, null, "Each set must include quantity and price"));
+      }
+      if (isNaN(set.quantity) || parseFloat(set.quantity) <= 0) {
+        return res.status(400).json(new ApiResponse(400, null, "Set quantity must be a positive number"));
+      }
+      if (isNaN(set.price) || parseFloat(set.price) <= 0) {
+        return res.status(400).json(new ApiResponse(400, null, "Set price must be a positive number"));
+      }
+    }
+
+    vegetableData.setPricing = {
+      enabled: true,
+      sets: sets.map((s) => ({
+        quantity: parseFloat(s.quantity),
+        unit: s.unit || "pieces",
+        price: parseFloat(s.price),
+        marketPrice: s.marketPrice ? parseFloat(s.marketPrice) : undefined,
+        label: s.label,
+      })),
+    };
+
+    vegetableData.stockPieces = parseFloat(stockPieces);
+    vegetableData.outOfStock = parseFloat(stockPieces) === 0;
+
+    // Set dummy values for required weight fields (schema requirement)
+    vegetableData.prices = {
+      weight1kg: 0,
+      weight500g: 0,
+      weight250g: 0,
+      weight100g: 0,
+    };
+    vegetableData.marketPrices = {
+      weight1kg: 0,
+      weight500g: 0,
+      weight250g: 0,
+      weight100g: 0,
+    };
+    vegetableData.stockKg = 0;
+  } 
+  // WEIGHT-BASED PRICING MODE
+  else {
+    if (price1kg === undefined || marketPrice1kg === undefined || stockKg === undefined) {
+      return res.status(400).json(new ApiResponse(400, null, "Missing required fields: price1kg, marketPrice1kg, stockKg"));
+    }
+
+    if (isNaN(price1kg) || parseFloat(price1kg) <= 0) {
+      return res.status(400).json(new ApiResponse(400, null, "VegBazar price must be a valid positive number"));
+    }
+
+    if (isNaN(marketPrice1kg) || parseFloat(marketPrice1kg) <= 0) {
+      return res.status(400).json(new ApiResponse(400, null, "Market price must be a valid positive number"));
+    }
+
+    if (isNaN(stockKg) || parseFloat(stockKg) < 0) {
+      return res.status(400).json(new ApiResponse(400, null, "Stock must be a valid non-negative number"));
+    }
+
+    const stockValue = parseFloat(stockKg);
+
+    vegetableData.prices = calculatePrices(price1kg);
+    vegetableData.marketPrices = calculateMarketPrices(marketPrice1kg);
+    vegetableData.stockKg = stockValue;
+    vegetableData.outOfStock = stockValue < 0.25;
+    vegetableData.setPricing = { enabled: false, sets: [] };
+    vegetableData.stockPieces = 0;
+  }
+
+  const vegetable = new Vegetable(vegetableData);
   await vegetable.save();
+
   res.json(new ApiResponse(201, vegetable, "Vegetable added successfully"));
 });
 
-// Delete Vegetable
 export const deleteVegetable = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const result = await Vegetable.findByIdAndDelete(id);
+  
   if (!result) {
-    return res
-      .status(404)
-      .json(new ApiResponse(404, null, "Vegetable not found"));
+    return res.status(404).json(new ApiResponse(404, null, "Vegetable not found"));
   }
+  
   res.json(new ApiResponse(200, result, "Vegetable deleted successfully"));
 });
 
-// Update Vegetable
 export const updateVegetable = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { 
-    price1kg,        // Single input for VegBazar 1kg price
-    marketPrice1kg,  // Single input for Market 1kg price
-    stockKg, 
-    image, 
+  const {
+    price1kg,
+    marketPrice1kg,
+    stockKg,
+    image,
     name,
-    offer, 
-    description, 
-    screenNumber 
+    offer,
+    description,
+    screenNumber,
+    setPricingEnabled,
+    sets,
+    stockPieces,
   } = req.body;
 
-  // console.log(price1kg, marketPrice1kg, stockKg, image, name, offer, description, screenNumber);
-
-  if (
-    price1kg === undefined &&
-    marketPrice1kg === undefined &&
-    stockKg === undefined &&
-    image === undefined &&
-    name === undefined &&
-    offer === undefined &&
-    description === undefined &&
-    screenNumber === undefined
-  ) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "At least one field is required for update")
-      );
-  }
-
-  // Validate price1kg if provided
-  if (price1kg !== undefined && (isNaN(price1kg) || parseFloat(price1kg) <= 0)) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "VegBazar price must be a valid positive number")
-      );
-  }
-
-  // Validate marketPrice1kg if provided
-  if (marketPrice1kg !== undefined && (isNaN(marketPrice1kg) || parseFloat(marketPrice1kg) <= 0)) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "Market price must be a valid positive number")
-      );
-  }
-
-  // Allow 0 stock but must be a valid number
-  if (stockKg !== undefined && (isNaN(stockKg) || parseFloat(stockKg) < 0)) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "Stock must be a valid non-negative number")
-      );
+  // Fetch existing vegetable
+  const existingVeg = await Vegetable.findById(id);
+  if (!existingVeg) {
+    return res.status(404).json(new ApiResponse(404, null, "Vegetable not found"));
   }
 
   const updateData = {};
 
-  // Auto-calculate all weight prices if price1kg is provided
-  if (price1kg !== undefined) {
-    updateData.prices = calculatePrices(price1kg);
+  // HANDLE PRICING MODE SWITCH
+  if (setPricingEnabled !== undefined) {
+    if (setPricingEnabled === true) {
+      // SWITCHING TO SET-BASED PRICING
+      if (!sets || !Array.isArray(sets) || sets.length === 0) {
+        return res.status(400).json(new ApiResponse(400, null, "Sets array is required when enabling set pricing"));
+      }
+
+      // Validate sets
+      for (const set of sets) {
+        if (!set.quantity || !set.price || parseFloat(set.quantity) <= 0 || parseFloat(set.price) <= 0) {
+          return res.status(400).json(new ApiResponse(400, null, "Each set must have valid quantity and price"));
+        }
+      }
+
+      updateData.setPricing = {
+        enabled: true,
+        sets: sets.map(s => ({
+          quantity: parseFloat(s.quantity),
+          unit: s.unit || "pieces",
+          price: parseFloat(s.price),
+          marketPrice: s.marketPrice ? parseFloat(s.marketPrice) : undefined,
+          label: s.label || `${s.quantity} ${s.unit || "pieces"}`,
+        })),
+      };
+
+      // Update stock pieces
+      if (stockPieces !== undefined) {
+        if (isNaN(stockPieces) || parseFloat(stockPieces) < 0) {
+          return res.status(400).json(new ApiResponse(400, null, "Valid stockPieces required"));
+        }
+        updateData.stockPieces = parseFloat(stockPieces);
+        updateData.outOfStock = parseFloat(stockPieces) === 0;
+      } else {
+        updateData.stockPieces = 0;
+        updateData.outOfStock = true;
+      }
+
+      // Zero out weight-based fields
+      updateData.stockKg = 0;
+    } else {
+      // SWITCHING TO WEIGHT-BASED PRICING
+      if (price1kg !== undefined && marketPrice1kg !== undefined && stockKg !== undefined) {
+        if (parseFloat(price1kg) <= 0 || parseFloat(marketPrice1kg) <= 0 || parseFloat(stockKg) < 0) {
+          return res.status(400).json(new ApiResponse(400, null, "Valid price and stock required for weight pricing"));
+        }
+
+        const stockValue = parseFloat(stockKg);
+        updateData.prices = calculatePrices(price1kg);
+        updateData.marketPrices = calculateMarketPrices(marketPrice1kg);
+        updateData.stockKg = stockValue;
+        updateData.outOfStock = stockValue < 0.25;
+        updateData.setPricing = { enabled: false, sets: [] };
+        updateData.stockPieces = 0;
+      } else {
+        // Use existing weight data if not provided
+        updateData.setPricing = { enabled: false, sets: [] };
+        updateData.stockPieces = 0;
+        if (existingVeg.stockKg !== undefined) {
+          updateData.outOfStock = existingVeg.stockKg < 0.25;
+        }
+      }
+    }
+  }
+  // UPDATE WITHIN CURRENT MODE (no mode switch)
+  else {
+    const currentMode = existingVeg.setPricing?.enabled === true;
+
+    if (currentMode) {
+      // UPDATING SET-BASED ITEM
+      if (sets !== undefined) {
+        if (!Array.isArray(sets) || sets.length === 0) {
+          return res.status(400).json(new ApiResponse(400, null, "Sets array cannot be empty"));
+        }
+
+        for (const set of sets) {
+          if (!set.quantity || !set.price || parseFloat(set.quantity) <= 0 || parseFloat(set.price) <= 0) {
+            return res.status(400).json(new ApiResponse(400, null, "Each set must have valid quantity and price"));
+          }
+        }
+
+        updateData.setPricing = {
+          enabled: true,
+          sets: sets.map(s => ({
+            quantity: parseFloat(s.quantity),
+            unit: s.unit || "pieces",
+            price: parseFloat(s.price),
+            marketPrice: s.marketPrice ? parseFloat(s.marketPrice) : undefined,
+            label: s.label || `${s.quantity} ${s.unit || "pieces"}`,
+          })),
+        };
+      }
+
+      if (stockPieces !== undefined) {
+        if (isNaN(stockPieces) || parseFloat(stockPieces) < 0) {
+          return res.status(400).json(new ApiResponse(400, null, "Valid stockPieces required"));
+        }
+        updateData.stockPieces = parseFloat(stockPieces);
+        updateData.outOfStock = parseFloat(stockPieces) === 0;
+      }
+    } else {
+      // UPDATING WEIGHT-BASED ITEM
+      if (price1kg !== undefined) {
+        if (parseFloat(price1kg) <= 0) {
+          return res.status(400).json(new ApiResponse(400, null, "VegBazar price must be positive"));
+        }
+        updateData.prices = calculatePrices(price1kg);
+      }
+
+      if (marketPrice1kg !== undefined) {
+        if (parseFloat(marketPrice1kg) <= 0) {
+          return res.status(400).json(new ApiResponse(400, null, "Market price must be positive"));
+        }
+        updateData.marketPrices = calculateMarketPrices(marketPrice1kg);
+      }
+
+      if (stockKg !== undefined) {
+        if (isNaN(stockKg) || parseFloat(stockKg) < 0) {
+          return res.status(400).json(new ApiResponse(400, null, "Stock must be non-negative"));
+        }
+        const stockValue = parseFloat(stockKg);
+        updateData.stockKg = stockValue;
+        updateData.outOfStock = stockValue < 0.25;
+      }
+    }
   }
 
-  // Auto-calculate all weight market prices if marketPrice1kg is provided
-  if (marketPrice1kg !== undefined) {
-    updateData.marketPrices = calculateMarketPrices(marketPrice1kg);
-  }
-
-  if (stockKg !== undefined) {
-    const stockValue = parseFloat(stockKg);
-    updateData.stockKg = stockValue;
-    updateData.outOfStock = stockValue === 0; // Update outOfStock based on stockKg
-  }
-  
+  // UPDATE COMMON FIELDS
   if (image !== undefined) updateData.image = image;
   if (name !== undefined) updateData.name = name;
   if (offer !== undefined) updateData.offer = offer;
   if (description !== undefined) updateData.description = description;
   if (screenNumber !== undefined) updateData.screenNumber = screenNumber;
 
-  try {
-    const vegetable = await Vegetable.findByIdAndUpdate(id, updateData, {
-      new: true,
-      runValidators: true,
-    });
+  // Perform update
+  const vegetable = await Vegetable.findByIdAndUpdate(
+    id,
+    { $set: updateData },
+    { new: true, runValidators: true }
+  );
 
-    if (!vegetable) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Vegetable not found"));
-    }
-
-    res.json(new ApiResponse(200, vegetable, "Vegetable updated successfully"));
-  } catch (error) {
-    if (error.name === "CastError") {
-      return res
-        .status(400)
-        .json(new ApiResponse(400, null, "Invalid vegetable ID format"));
-    }
-
-    if (error.name === "ValidationError") {
-      return res
-        .status(400)
-        .json(new ApiResponse(400, null, error.message));
-    }
-
-    throw error;
+  if (!vegetable) {
+    return res.status(404).json(new ApiResponse(404, null, "Vegetable not found"));
   }
-});
-export const homepageApi = asyncHandler(async (req, res) => {
-  // Fetch only in-stock vegetables
-  const vegetables = await Vegetable.find({ outOfStock: false });
-  
-  // Transform data to include weight options for frontend dropdown
-  const vegetablesWithWeightOptions = vegetables.map(veg => ({
-    ...veg.toObject(),
-    weightOptions: [
-      { weight: '1kg', price: veg.prices.weight1kg, marketPrice: veg.marketPrices.weight1kg },
-      { weight: '500g', price: veg.prices.weight500g, marketPrice: veg.marketPrices.weight500g },
-      { weight: '250g', price: veg.prices.weight250g, marketPrice: veg.marketPrices.weight250g },
-      { weight: '100g', price: veg.prices.weight100g, marketPrice: veg.marketPrices.weight100g },
-    ]
-  }));
 
-  res.json(new ApiResponse(200, vegetablesWithWeightOptions, "Vegetables fetched successfully"));
+  res.json(new ApiResponse(200, vegetable, "Vegetable updated successfully"));
+});
+
+export const homepageApi = asyncHandler(async (req, res) => {
+  // fetch only in-stock vegetables
+  const vegetables = await Vegetable.find({ outOfStock: false });
+
+  // convert docs to plain objects and attach pricing/set options
+  const vegetablesWithOptions = vegetables.map((veg) =>
+    formatVegetableWithOptions(veg)
+  );
+
+  // Fisher-Yates shuffle (in-place)
+  for (let i = vegetablesWithOptions.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [vegetablesWithOptions[i], vegetablesWithOptions[j]] = [
+      vegetablesWithOptions[j],
+      vegetablesWithOptions[i],
+    ];
+  }
+
+  res.json(
+    new ApiResponse(200, vegetablesWithOptions, "Vegetables fetched successfully")
+  );
 });
