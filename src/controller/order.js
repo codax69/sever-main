@@ -18,24 +18,50 @@ const razorpay = new Razorpay({
 });
 
 // ============================================================================
-// PRICING HELPER FUNCTIONS
+// CONSTANTS & CONFIGS (Memory efficient)
 // ============================================================================
 
-/**
- * Get price for set-based pricing
- */
+const WEIGHT_TO_KG = Object.freeze({
+  "1kg": 1,
+  "500g": 0.5,
+  "250g": 0.25,
+  "100g": 0.1,
+});
+
+const WEIGHT_PRICE_MAP = Object.freeze({
+  "1kg": "weight1kg",
+  "500g": "weight500g",
+  "250g": "weight250g",
+  "100g": "weight100g",
+});
+
+const VALID_ORDER_STATUSES = Object.freeze([
+  "placed",
+  "processed",
+  "shipped",
+  "delivered",
+  "cancelled",
+]);
+
+const DELIVERY_CHARGES_RUPEES = DELIVERY_CHARGES / 100;
+const FREE_DELIVERY_THRESHOLD = 250;
+
+// ============================================================================
+// PRICING HELPER FUNCTIONS (Optimized)
+// ============================================================================
+
 function getPriceForSet(vegetable, setIndex) {
-  if (!vegetable.setPricing?.enabled || !vegetable.setPricing?.sets) {
+  const sets = vegetable.setPricing?.sets;
+  if (!vegetable.setPricing?.enabled || !sets) {
     throw new Error(
       `Vegetable ${vegetable.name} does not have set pricing enabled`
     );
   }
 
-  const setOption = vegetable.setPricing.sets[setIndex];
-
+  const setOption = sets[setIndex];
   if (!setOption) {
     throw new Error(
-      `Invalid set index: ${setIndex}. Available sets: 0-${vegetable.setPricing.sets.length - 1}`
+      `Invalid set index: ${setIndex}. Available sets: 0-${sets.length - 1}`
     );
   }
 
@@ -47,34 +73,25 @@ function getPriceForSet(vegetable, setIndex) {
   };
 }
 
-/**
- * Get price for weight-based pricing
- */
 function getPriceForWeight(vegetable, weight) {
-  const weightMap = {
-    "1kg": "weight1kg",
-    "500g": "weight500g",
-    "250g": "weight250g",
-    "100g": "weight100g",
-  };
+  const priceKey = WEIGHT_PRICE_MAP[weight];
+  const price = vegetable.prices?.[priceKey];
 
-  const priceKey = weightMap[weight];
-  if (!priceKey || !vegetable.prices?.[priceKey]) {
+  if (!priceKey || !price) {
     throw new Error(
       `Invalid weight: ${weight}. Must be one of: 1kg, 500g, 250g, 100g`
     );
   }
-  return vegetable.prices[priceKey];
+  return price;
 }
 
-/**
- * Get price based on vegetable's pricing type
- */
 function getPrice(vegetable, weightOrSet, quantity = 1) {
-  if (vegetable.pricingType === "set" || vegetable.setPricing?.enabled) {
-    // Handle set-based pricing
+  const isSetBased =
+    vegetable.pricingType === "set" || vegetable.setPricing?.enabled;
+
+  if (isSetBased) {
     const setIndex = weightOrSet.startsWith("set")
-      ? parseInt(weightOrSet.replace("set", ""))
+      ? parseInt(weightOrSet.slice(3))
       : parseInt(weightOrSet);
 
     const setInfo = getPriceForSet(vegetable, setIndex);
@@ -88,66 +105,49 @@ function getPrice(vegetable, weightOrSet, quantity = 1) {
       setQuantity: setInfo.quantity,
       setUnit: setInfo.unit,
     };
-  } else {
-    // Handle weight-based pricing
-    const pricePerUnit = getPriceForWeight(vegetable, weightOrSet);
-
-    return {
-      type: "weight",
-      pricePerUnit,
-      subtotal: pricePerUnit * quantity,
-      weight: weightOrSet,
-    };
   }
-}
 
-// ============================================================================
-// STOCK CALCULATION FUNCTIONS
-// ============================================================================
-
-/**
- * Calculate kg from weight for stock deduction (weight-based only)
- */
-function calculateKgFromWeight(weight, quantity) {
-  const weightToKg = {
-    "1kg": 1,
-    "500g": 0.5,
-    "250g": 0.25,
-    "100g": 0.1,
+  const pricePerUnit = getPriceForWeight(vegetable, weightOrSet);
+  return {
+    type: "weight",
+    pricePerUnit,
+    subtotal: pricePerUnit * quantity,
+    weight: weightOrSet,
   };
-
-  return weightToKg[weight] * quantity;
 }
 
-/**
- * Calculate pieces from set for stock deduction (set-based only)
- */
+// ============================================================================
+// STOCK CALCULATION FUNCTIONS (Optimized)
+// ============================================================================
+
+function calculateKgFromWeight(weight, quantity) {
+  return (WEIGHT_TO_KG[weight] || 0) * quantity;
+}
+
 function calculatePiecesFromSet(vegetable, setIndex, quantity) {
   const setOption = vegetable.setPricing.sets[setIndex];
   if (!setOption) {
     throw new Error(`Invalid set index: ${setIndex}`);
   }
-
   return setOption.quantity * quantity;
 }
 
-/**
- * Deduct stock for ordered vegetables (handles both weight and set pricing)
- */
 async function deductVegetableStock(selectedVegetables) {
   const stockUpdates = [];
+  const bulkOps = [];
 
+  // First pass: Validate all items
   for (const item of selectedVegetables) {
-    const vegetable = await Vegetable.findById(item.vegetable);
-
+    const vegetable = await Vegetable.findById(item.vegetable).lean();
     if (!vegetable) {
       throw new Error(`Vegetable not found: ${item.vegetable}`);
     }
 
-    if (vegetable.pricingType === "set" || vegetable.setPricing?.enabled) {
-      // Handle set-based stock
-      const setIndex =
-        item.setIndex ?? parseInt(item.weight?.replace("set", "") || "0");
+    const isSetBased =
+      vegetable.pricingType === "set" || vegetable.setPricing?.enabled;
+
+    if (isSetBased) {
+      const setIndex = item.setIndex ?? parseInt(item.weight?.slice(3) || "0");
       const piecesToDeduct = calculatePiecesFromSet(
         vegetable,
         setIndex,
@@ -167,8 +167,17 @@ async function deductVegetableStock(selectedVegetables) {
         previousStock: vegetable.stockPieces,
         type: "pieces",
       });
+
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: item.vegetable },
+          update: {
+            $inc: { stockPieces: -piecesToDeduct },
+            $set: { outOfStock: vegetable.stockPieces - piecesToDeduct <= 0 },
+          },
+        },
+      });
     } else {
-      // Handle weight-based stock
       const kgToDeduct = calculateKgFromWeight(item.weight, item.quantity);
 
       if (vegetable.stockKg < kgToDeduct) {
@@ -184,124 +193,109 @@ async function deductVegetableStock(selectedVegetables) {
         previousStock: vegetable.stockKg,
         type: "kg",
       });
+
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: item.vegetable },
+          update: {
+            $inc: { stockKg: -kgToDeduct },
+            $set: { outOfStock: vegetable.stockKg - kgToDeduct < 0.25 },
+          },
+        },
+      });
     }
   }
 
-  // If all checks pass, update all stocks
-  for (const update of stockUpdates) {
-    if (update.type === "pieces") {
-      const updatedVeg = await Vegetable.findByIdAndUpdate(
-        update.vegetableId,
-        { $inc: { stockPieces: -update.deducted } },
-        { new: true }
-      );
-
-      if (updatedVeg.stockPieces <= 0) {
-        await Vegetable.findByIdAndUpdate(update.vegetableId, {
-          $set: { outOfStock: true },
-        });
-      }
-    } else {
-      const updatedVeg = await Vegetable.findByIdAndUpdate(
-        update.vegetableId,
-        { $inc: { stockKg: -update.deducted } },
-        { new: true }
-      );
-
-      if (updatedVeg.stockKg < 0.25) {
-        await Vegetable.findByIdAndUpdate(update.vegetableId, {
-          $set: { outOfStock: true },
-        });
-      }
-    }
+  // Bulk update all stocks at once (much faster)
+  if (bulkOps.length > 0) {
+    await Vegetable.bulkWrite(bulkOps);
   }
 
   return stockUpdates;
 }
 
-/**
- * Restore stock for cancelled vegetables (handles both weight and set pricing)
- */
 async function restoreVegetableStock(selectedVegetables) {
   const stockUpdates = [];
+  const bulkOps = [];
 
   for (const item of selectedVegetables) {
-    const vegetable = await Vegetable.findById(item.vegetable);
-
+    const vegetable = await Vegetable.findById(item.vegetable).lean();
     if (!vegetable) continue;
 
-    if (vegetable.pricingType === "set" || vegetable.setPricing?.enabled) {
-      // Handle set-based stock restoration
-      const setIndex =
-        item.setIndex ?? parseInt(item.weight?.replace("set", "") || "0");
+    const isSetBased =
+      vegetable.pricingType === "set" || vegetable.setPricing?.enabled;
+
+    if (isSetBased) {
+      const setIndex = item.setIndex ?? parseInt(item.weight?.slice(3) || "0");
       const piecesToRestore = calculatePiecesFromSet(
         vegetable,
         setIndex,
         item.quantity
       );
 
-      const updatedVeg = await Vegetable.findByIdAndUpdate(
-        item.vegetable,
-        { $inc: { stockPieces: piecesToRestore } },
-        { new: true }
-      );
-
-      if (updatedVeg && updatedVeg.stockPieces > 0) {
-        await Vegetable.findByIdAndUpdate(item.vegetable, {
-          $set: { outOfStock: false },
-        });
-      }
-
       stockUpdates.push({
         vegetableId: item.vegetable,
         vegetableName: vegetable.name,
         restored: piecesToRestore,
-        newStock: updatedVeg.stockPieces,
+        newStock: vegetable.stockPieces + piecesToRestore,
         type: "pieces",
       });
+
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: item.vegetable },
+          update: {
+            $inc: { stockPieces: piecesToRestore },
+            $set: { outOfStock: false },
+          },
+        },
+      });
     } else {
-      // Handle weight-based stock restoration
       const kgToRestore = calculateKgFromWeight(item.weight, item.quantity);
-
-      const updatedVeg = await Vegetable.findByIdAndUpdate(
-        item.vegetable,
-        { $inc: { stockKg: kgToRestore } },
-        { new: true }
-      );
-
-      if (updatedVeg && updatedVeg.stockKg >= 0.25) {
-        await Vegetable.findByIdAndUpdate(item.vegetable, {
-          $set: { outOfStock: false },
-        });
-      }
 
       stockUpdates.push({
         vegetableId: item.vegetable,
         vegetableName: vegetable.name,
         restored: kgToRestore,
-        newStock: updatedVeg.stockKg,
+        newStock: vegetable.stockKg + kgToRestore,
         type: "kg",
       });
+
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: item.vegetable },
+          update: {
+            $inc: { stockKg: kgToRestore },
+            $set: {
+              outOfStock:
+                vegetable.stockKg + kgToRestore >= 0.25 ? false : true,
+            },
+          },
+        },
+      });
     }
+  }
+
+  // Bulk update all stocks at once
+  if (bulkOps.length > 0) {
+    await Vegetable.bulkWrite(bulkOps);
   }
 
   return stockUpdates;
 }
 
 // ============================================================================
-// ORDER PROCESSING HELPER FUNCTIONS
+// ORDER PROCESSING HELPER FUNCTIONS (Optimized)
 // ============================================================================
 
 async function processCustomer(customerInfo) {
   if (typeof customerInfo === "string") {
-    const customer = await Customer.findById(customerInfo);
-    if (!customer) throw new Error("Customer not found");
+    const exists = await Customer.exists({ _id: customerInfo });
+    if (!exists) throw new Error("Customer not found");
     return customerInfo;
   }
 
-  if (customerInfo._id) {
-    return customerInfo._id;
-  }
+  if (customerInfo._id) return customerInfo._id;
 
   if (!customerInfo.mobile || !customerInfo.name) {
     throw new Error("Customer name and mobile are required");
@@ -310,62 +304,33 @@ async function processCustomer(customerInfo) {
   const updateData = {
     name: customerInfo.name,
     mobile: customerInfo.mobile,
+    ...(customerInfo.city && { city: customerInfo.city }),
+    ...(customerInfo.area && { area: customerInfo.area }),
+    ...(customerInfo.email && { email: customerInfo.email }),
+    ...(customerInfo.address && { address: customerInfo.address }),
   };
 
-  if (customerInfo.city) updateData.city = customerInfo.city;
-  if (customerInfo.area) updateData.area = customerInfo.area;
-  if (customerInfo.email) updateData.email = customerInfo.email;
-  if (customerInfo.address) updateData.address = customerInfo.address;
-
   try {
-    let customer = await Customer.findOne({ mobile: customerInfo.mobile });
-
-    if (customer) {
-      customer = await Customer.findByIdAndUpdate(
-        customer._id,
-        { $set: updateData },
-        { new: true, runValidators: true }
-      );
-    } else {
-      if (customerInfo.email) {
-        const existingEmailCustomer = await Customer.findOne({
-          email: customerInfo.email,
-        });
-
-        if (existingEmailCustomer) {
-          customer = await Customer.findByIdAndUpdate(
-            existingEmailCustomer._id,
-            { $set: updateData },
-            { new: true, runValidators: true }
-          );
-        } else {
-          customer = await Customer.create(updateData);
-        }
-      } else {
-        customer = await Customer.create(updateData);
-      }
-    }
-
+    const customer = await Customer.findOneAndUpdate(
+      { mobile: customerInfo.mobile },
+      { $set: updateData },
+      { new: true, upsert: true, runValidators: true }
+    );
     return customer._id;
   } catch (error) {
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern)[0];
+      const query =
+        field === "email" && customerInfo.email
+          ? { email: customerInfo.email }
+          : { mobile: customerInfo.mobile };
 
-      if (field === "email" && customerInfo.email) {
-        const customer = await Customer.findOneAndUpdate(
-          { email: customerInfo.email },
-          { $set: updateData },
-          { new: true, runValidators: true }
-        );
-        return customer._id;
-      } else if (field === "mobile") {
-        const customer = await Customer.findOneAndUpdate(
-          { mobile: customerInfo.mobile },
-          { $set: updateData },
-          { new: true, runValidators: true }
-        );
-        return customer._id;
-      }
+      const customer = await Customer.findOneAndUpdate(
+        query,
+        { $set: updateData },
+        { new: true, runValidators: true }
+      );
+      return customer._id;
     }
     throw error;
   }
@@ -377,7 +342,7 @@ async function processOffer(selectedOffer) {
   let query = {};
 
   if (typeof selectedOffer === "string") {
-    if (!selectedOffer.match(/^[0-9a-fA-F]{24}$/)) {
+    if (!/^[0-9a-fA-F]{24}$/.test(selectedOffer)) {
       throw new Error("Invalid offer ID format");
     }
     query = { _id: selectedOffer };
@@ -389,7 +354,7 @@ async function processOffer(selectedOffer) {
     throw new Error("Invalid offer data");
   }
 
-  const offer = await Offer.findOne(query);
+  const offer = await Offer.findOne(query).select("_id").lean();
   if (!offer) throw new Error("Offer not found");
 
   return offer._id;
@@ -397,19 +362,14 @@ async function processOffer(selectedOffer) {
 
 function getVegetableIdentifier(item) {
   if (typeof item === "string") return item;
-
   if (item.vegetable) {
     return typeof item.vegetable === "string"
       ? item.vegetable
       : item.vegetable._id || item.vegetable.id;
   }
-
   return item._id || item.id || item.name;
 }
 
-/**
- * Process vegetables for order (handles both weight and set pricing)
- */
 async function processVegetables(selectedVegetables, isFromBasket = false) {
   if (!Array.isArray(selectedVegetables) || selectedVegetables.length === 0) {
     throw new Error("selectedVegetables must be a non-empty array");
@@ -423,8 +383,9 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
     throw new Error("No valid vegetable identifiers found");
   }
 
-  const isObjectId = uniqueVegIds[0].match(/^[0-9a-fA-F]{24}$/);
+  const isObjectId = /^[0-9a-fA-F]{24}$/.test(uniqueVegIds[0]);
 
+  // Use lean() for better performance
   const vegetables = await Vegetable.find(
     isObjectId
       ? { _id: { $in: uniqueVegIds } }
@@ -434,7 +395,7 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
             { _id: { $in: uniqueVegIds } },
           ],
         }
-  );
+  ).lean();
 
   if (vegetables.length !== uniqueVegIds.length) {
     const foundIds = vegetables.map((v) => v._id.toString());
@@ -446,17 +407,18 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
     );
   }
 
-  const vegMap = new Map();
+  // Use object instead of Map for better performance with small datasets
+  const vegMap = {};
   vegetables.forEach((veg) => {
-    vegMap.set(veg._id.toString(), veg);
-    vegMap.set(veg.name, veg);
+    vegMap[veg._id.toString()] = veg;
+    vegMap[veg.name] = veg;
   });
 
-  const groupedItems = new Map();
+  const groupedItems = {};
 
   selectedVegetables.forEach((item) => {
     const identifier = getVegetableIdentifier(item);
-    const vegetable = vegMap.get(identifier);
+    const vegetable = vegMap[identifier];
 
     if (!vegetable) {
       throw new Error(`Vegetable not found: ${identifier}`);
@@ -464,11 +426,10 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
 
     const weightOrSet = (typeof item === "object" && item?.weight) || "1kg";
     const quantity = (typeof item === "object" && item?.quantity) || 1;
+    const groupKey = `${vegetable._id}_${weightOrSet}`;
 
-    const groupKey = `${vegetable._id.toString()}_${weightOrSet}`;
-
-    if (groupedItems.has(groupKey)) {
-      const existing = groupedItems.get(groupKey);
+    if (groupedItems[groupKey]) {
+      const existing = groupedItems[groupKey];
       existing.quantity += quantity;
       existing.subtotal = existing.pricePerUnit * existing.quantity;
     } else {
@@ -483,7 +444,7 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
       };
 
       if (priceInfo.type === "set") {
-        itemData.weight = weightOrSet; // Store original "set0", "set1", etc.
+        itemData.weight = weightOrSet;
         itemData.setIndex = priceInfo.setIndex;
         itemData.setLabel = priceInfo.label;
         itemData.setQuantity = priceInfo.setQuantity;
@@ -492,11 +453,11 @@ async function processVegetables(selectedVegetables, isFromBasket = false) {
         itemData.weight = priceInfo.weight;
       }
 
-      groupedItems.set(groupKey, itemData);
+      groupedItems[groupKey] = itemData;
     }
   });
 
-  return Array.from(groupedItems.values());
+  return Object.values(groupedItems);
 }
 
 async function processOrderData(
@@ -507,12 +468,13 @@ async function processOrderData(
 ) {
   try {
     const isBasketOrder = orderType === "basket";
-    const customerId = await processCustomer(customerInfo);
-    const offerId = isBasketOrder ? await processOffer(selectedOffer) : null;
-    const processedVegetables = await processVegetables(
-      selectedVegetables,
-      isBasketOrder
-    );
+
+    // Process in parallel for better performance
+    const [customerId, offerId, processedVegetables] = await Promise.all([
+      processCustomer(customerInfo),
+      isBasketOrder ? processOffer(selectedOffer) : Promise.resolve(null),
+      processVegetables(selectedVegetables, isBasketOrder),
+    ]);
 
     return { customerId, offerId, processedVegetables };
   } catch (error) {
@@ -531,41 +493,34 @@ function calculateOrderTotal(
     0
   );
 
-  const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
-
-  let totalAmount;
-  let finalOfferPrice = 0;
-  let appliedDeliveryCharges = 0;
-  let subtotalAfterDiscount = 0;
-
   if (orderType === "basket") {
-    if (!offerPrice) {
+    if (!offerPrice)
       throw new Error("Offer price is required for basket orders");
-    }
 
-    finalOfferPrice = offerPrice;
-    subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
-    appliedDeliveryCharges = deliveryChargesInRupees;
-    totalAmount = subtotalAfterDiscount + deliveryChargesInRupees;
-  } else {
-    subtotalAfterDiscount = Math.max(0, vegetablesTotal - couponDiscount);
-
-    if (subtotalAfterDiscount > 250) {
-      appliedDeliveryCharges = 0;
-      totalAmount = subtotalAfterDiscount;
-    } else {
-      appliedDeliveryCharges = deliveryChargesInRupees;
-      totalAmount = subtotalAfterDiscount + deliveryChargesInRupees;
-    }
+    const subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
+    return {
+      vegetablesTotal,
+      offerPrice,
+      couponDiscount,
+      subtotalAfterDiscount,
+      deliveryCharges: DELIVERY_CHARGES_RUPEES,
+      totalAmount: subtotalAfterDiscount + DELIVERY_CHARGES_RUPEES,
+    };
   }
+
+  const subtotalAfterDiscount = Math.max(0, vegetablesTotal - couponDiscount);
+  const appliedDeliveryCharges =
+    subtotalAfterDiscount > FREE_DELIVERY_THRESHOLD
+      ? 0
+      : DELIVERY_CHARGES_RUPEES;
 
   return {
     vegetablesTotal,
-    offerPrice: finalOfferPrice,
+    offerPrice: 0,
     couponDiscount,
     subtotalAfterDiscount,
     deliveryCharges: appliedDeliveryCharges,
-    totalAmount,
+    totalAmount: subtotalAfterDiscount + appliedDeliveryCharges,
   };
 }
 
@@ -579,61 +534,61 @@ async function validateAndApplyCoupon(couponCode, subtotal, customerId = null) {
     };
   }
 
-  try {
-    const coupon = await Coupon.findOne({
-      code: couponCode.toUpperCase(),
-      isActive: true,
-    });
+  const coupon = await Coupon.findOne({
+    code: couponCode.toUpperCase(),
+    isActive: true,
+  }).lean();
 
-    if (!coupon) {
-      throw new Error("Invalid coupon code");
-    }
+  if (!coupon) throw new Error("Invalid coupon code");
 
-    // Check expiry
-    if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
-      throw new Error("Coupon has expired");
-    }
-
-    // Check minimum order amount
-    if (coupon.minOrderAmount && subtotal < coupon.minOrderAmount) {
-      throw new Error(
-        `Minimum order amount of ₹${coupon.minOrderAmount} required for this coupon`
-      );
-    }
-
-    // Check usage limits
-    if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
-      throw new Error("Coupon usage limit reached");
-    }
-
-    // Check per-user limit if customerId is provided
-    if (customerId && coupon.perUserLimit) {
-      const userUsageCount =
-        coupon.usedBy?.filter((id) => id.toString() === customerId.toString())
-          .length || 0;
-      if (userUsageCount >= coupon.perUserLimit) {
-        throw new Error("You have reached the usage limit for this coupon");
-      }
-    }
-
-    // Calculate discount
-    const couponDiscount = coupon.calculateDiscount(subtotal);
-
-    return {
-      couponId: coupon._id,
-      couponDiscount,
-      validatedCouponCode: coupon.code,
-      couponDetails: {
-        code: coupon.code,
-        discountType: coupon.discountType,
-        discountValue: coupon.discountValue,
-        applied: true,
-        discount: couponDiscount,
-      },
-    };
-  } catch (error) {
-    throw error;
+  // Check expiry
+  if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
+    throw new Error("Coupon has expired");
   }
+
+  // Check minimum order amount
+  if (coupon.minOrderAmount && subtotal < coupon.minOrderAmount) {
+    throw new Error(
+      `Minimum order amount of ₹${coupon.minOrderAmount} required for this coupon`
+    );
+  }
+
+  // Check usage limits
+  if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
+    throw new Error("Coupon usage limit reached");
+  }
+
+  // Check per-user limit
+  if (customerId && coupon.perUserLimit) {
+    const userUsageCount =
+      coupon.usedBy?.filter((id) => id.toString() === customerId.toString())
+        .length || 0;
+    if (userUsageCount >= coupon.perUserLimit) {
+      throw new Error("You have reached the usage limit for this coupon");
+    }
+  }
+
+  // Calculate discount inline instead of method call
+  const couponDiscount =
+    coupon.discountType === "percentage"
+      ? Math.min(
+          (subtotal * coupon.discountValue) / 100,
+          coupon.maxDiscount || Infinity
+        )
+      : Math.min(coupon.discountValue, subtotal);
+
+  return {
+    couponId: coupon._id,
+    couponDiscount,
+    validatedCouponCode: coupon.code,
+    couponDetails: {
+      code: coupon.code,
+      discountType: coupon.discountType,
+      discountValue: coupon.discountValue,
+      applied: true,
+      discount: couponDiscount,
+    },
+  };
 }
 
 // ============================================================================
@@ -641,35 +596,24 @@ async function validateAndApplyCoupon(couponCode, subtotal, customerId = null) {
 // ============================================================================
 
 export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
-  try {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
 
-    const endOfDay = new Date();
-    endOfDay.setHours(23, 59, 59, 999);
+  const endOfDay = new Date();
+  endOfDay.setHours(23, 59, 59, 999);
 
-    const count = await Order.countDocuments({
-      createdAt: { $gte: startOfDay, $lte: endOfDay },
-    });
+  const count = await Order.countDocuments({
+    createdAt: { $gte: startOfDay, $lte: endOfDay },
+  });
 
-    res.json(
-      new ApiResponse(
-        200,
-        { count },
-        "Today's order count fetched successfully"
-      )
-    );
-  } catch (error) {
-    throw new ApiError(
-      500,
-      error.message || "Failed to calculate today's order total"
-    );
-  }
+  res.json(
+    new ApiResponse(200, { count }, "Today's order count fetched successfully")
+  );
 });
 
 export const getOrders = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page);
-  const limit = parseInt(req.query.limit);
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
   const skip = (page - 1) * limit;
 
   const filter = {};
@@ -677,16 +621,18 @@ export const getOrders = asyncHandler(async (req, res) => {
   if (req.query.paymentMethod) filter.paymentMethod = req.query.paymentMethod;
   if (req.query.orderType) filter.orderType = req.query.orderType;
 
-  const totalOrders = await Order.countDocuments(filter);
-
-  const orders = await Order.find(filter)
-    .populate("customerInfo")
-    .populate("selectedOffer")
-    .populate("selectedVegetables.vegetable")
-    .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(limit)
-    .lean();
+  // Execute count and find in parallel
+  const [totalOrders, orders] = await Promise.all([
+    Order.countDocuments(filter),
+    Order.find(filter)
+      .populate("customerInfo")
+      .populate("selectedOffer")
+      .populate("selectedVegetables.vegetable")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+  ]);
 
   res.json(
     new ApiResponse(
@@ -708,14 +654,15 @@ export const getOrders = asyncHandler(async (req, res) => {
 export const getOrderById = asyncHandler(async (req, res) => {
   const { orderId } = req.params;
 
-  if (!orderId.match(/^ORD\d{11}$/)) {
+  if (!/^ORD\d{11}$/.test(orderId)) {
     return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
   }
 
-  const order = await Order.findOne({ orderId: orderId })
+  const order = await Order.findOne({ orderId })
     .populate("customerInfo")
     .populate("selectedOffer")
-    .populate("selectedVegetables.vegetable");
+    .populate("selectedVegetables.vegetable")
+    .lean();
 
   if (!order) {
     return res.status(404).json(new ApiResponse(404, null, "Order not found"));
@@ -728,54 +675,36 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
   const { _id } = req.params;
   const { orderStatus } = req.body;
 
-  const validStatuses = [
-    "placed",
-    "processed",
-    "shipped",
-    "delivered",
-    "cancelled",
-  ];
-
-  if (!orderStatus || !validStatuses.includes(orderStatus)) {
+  if (!orderStatus || !VALID_ORDER_STATUSES.includes(orderStatus)) {
     return res
       .status(400)
       .json(
         new ApiResponse(
           400,
           null,
-          `Invalid order status. Must be one of: ${validStatuses.join(", ")}`
+          `Invalid order status. Must be one of: ${VALID_ORDER_STATUSES.join(", ")}`
         )
       );
   }
 
-  // Get the current order
-  const currentOrder = await Order.findById(_id);
-
+  const currentOrder = await Order.findById(_id).lean();
   if (!currentOrder) {
     return res.status(404).json(new ApiResponse(404, null, "Order not found"));
   }
 
-  // If order is being cancelled, restore stock
+  // Restore stock if cancelling
   if (orderStatus === "cancelled" && currentOrder.orderStatus !== "cancelled") {
     try {
-      const stockUpdates = await restoreVegetableStock(
-        currentOrder.selectedVegetables
-      );
-      // console.log("Stock restored for cancelled order:", stockUpdates);
+      await restoreVegetableStock(currentOrder.selectedVegetables);
     } catch (error) {
       console.error("Error restoring stock:", error.message);
-      // Continue with cancellation even if stock restore fails
     }
   }
 
-  // Update order status
   const order = await Order.findByIdAndUpdate(
     _id,
     { orderStatus },
-    {
-      new: true,
-      runValidators: true,
-    }
+    { new: true, runValidators: true }
   )
     .populate("customerInfo")
     .populate("selectedOffer")
@@ -826,11 +755,7 @@ export const addOrder = asyncHandler(async (req, res) => {
       );
   }
 
-  if (
-    !selectedVegetables ||
-    !Array.isArray(selectedVegetables) ||
-    selectedVegetables.length === 0
-  ) {
+  if (!Array.isArray(selectedVegetables) || selectedVegetables.length === 0) {
     return res
       .status(400)
       .json(
@@ -844,7 +769,7 @@ export const addOrder = asyncHandler(async (req, res) => {
       .json(new ApiResponse(400, null, "Order ID is required"));
   }
 
-  if (!paymentMethod || !["COD", "ONLINE"].includes(paymentMethod)) {
+  if (!["COD", "ONLINE"].includes(paymentMethod)) {
     return res
       .status(400)
       .json(
@@ -870,14 +795,10 @@ export const addOrder = asyncHandler(async (req, res) => {
 
   const { customerId, offerId, processedVegetables } = processed;
 
-  // Validate and apply coupon
-  let couponId = null;
-  let couponDiscount = 0;
-  let validatedCouponCode = null;
-  let subtotalForCoupon = 0;
-
+  // Calculate subtotal for coupon
+  let subtotalForCoupon;
   if (orderType === "basket") {
-    const offer = await Offer.findById(offerId);
+    const offer = await Offer.findById(offerId).select("price").lean();
     if (!offer) {
       return res
         .status(404)
@@ -890,6 +811,11 @@ export const addOrder = asyncHandler(async (req, res) => {
       0
     );
   }
+
+  // Validate coupon
+  let couponId = null;
+  let couponDiscount = 0;
+  let validatedCouponCode = null;
 
   if (couponCode) {
     try {
@@ -909,17 +835,15 @@ export const addOrder = asyncHandler(async (req, res) => {
   // Calculate totals
   let totals;
   if (orderType === "basket") {
-    const offer = await Offer.findById(offerId);
-    const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
+    const offer = await Offer.findById(offerId).select("price").lean();
     const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
-
     totals = {
       vegetablesTotal: 0,
       offerPrice: offer.price,
       couponDiscount,
       subtotalAfterDiscount,
-      deliveryCharges: deliveryChargesInRupees,
-      totalAmount: subtotalAfterDiscount + deliveryChargesInRupees,
+      deliveryCharges: DELIVERY_CHARGES_RUPEES,
+      totalAmount: subtotalAfterDiscount + DELIVERY_CHARGES_RUPEES,
     };
   } else {
     totals = calculateOrderTotal(
@@ -930,9 +854,8 @@ export const addOrder = asyncHandler(async (req, res) => {
     );
   }
 
-  // Handle COD payment
+  // COD payment
   if (paymentMethod === "COD") {
-    // Deduct stock before creating order
     let stockUpdates;
     try {
       stockUpdates = await deductVegetableStock(processedVegetables);
@@ -953,15 +876,11 @@ export const addOrder = asyncHandler(async (req, res) => {
       paymentStatus: "pending",
       orderStatus: "placed",
       stockUpdates,
+      ...(orderType === "basket" && { selectedOffer: offerId }),
     };
-
-    if (orderType === "basket") {
-      orderData.selectedOffer = offerId;
-    }
 
     const order = await Order.create(orderData);
 
-    // Increment coupon usage
     if (couponId) {
       await incrementCouponUsage(couponId, customerId);
     }
@@ -976,7 +895,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     );
   }
 
-  // Handle online payment - Don't deduct stock yet, wait for payment verification
+  // Online payment
   const amountInPaisa = Math.round(totals.totalAmount * 100);
 
   const razorpayOrder = await razorpay.orders.create({
@@ -994,19 +913,13 @@ export const addOrder = asyncHandler(async (req, res) => {
     couponCode: validatedCouponCode,
     couponId,
     ...totals,
+    ...(orderType === "basket" && { selectedOffer: offerId }),
   };
-
-  if (orderType === "basket") {
-    orderData.selectedOffer = offerId;
-  }
 
   res.json(
     new ApiResponse(
       201,
-      {
-        razorpayOrder,
-        orderData,
-      },
+      { razorpayOrder, orderData },
       "Razorpay order created. Complete payment to confirm order."
     )
   );
@@ -1063,8 +976,8 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       );
   }
 
-  // Check for duplicate payment
-  const existingOrder = await Order.findOne({
+  // Check duplicate
+  const existingOrder = await Order.exists({
     razorpayPaymentId: razorpay_payment_id,
   });
 
@@ -1097,7 +1010,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   let subtotalForCoupon = 0;
 
   if (orderType === "basket") {
-    const offer = await Offer.findById(offerId);
+    const offer = await Offer.findById(offerId).select("price").lean();
     if (!offer) {
       return res
         .status(404)
@@ -1129,17 +1042,15 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   // Calculate totals
   let totals;
   if (orderType === "basket") {
-    const offer = await Offer.findById(offerId);
-    const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
+    const offer = await Offer.findById(offerId).select("price").lean();
     const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
-
     totals = {
       vegetablesTotal: 0,
       offerPrice: offer.price,
       couponDiscount,
       subtotalAfterDiscount,
-      deliveryCharges: deliveryChargesInRupees,
-      totalAmount: subtotalAfterDiscount + deliveryChargesInRupees,
+      deliveryCharges: DELIVERY_CHARGES_RUPEES,
+      totalAmount: subtotalAfterDiscount + DELIVERY_CHARGES_RUPEES,
     };
   } else {
     totals = calculateOrderTotal(
@@ -1155,7 +1066,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   try {
     stockUpdates = await deductVegetableStock(processedVegetables);
   } catch (error) {
-    // Payment succeeded but stock insufficient - critical situation
     console.error("Stock deduction failed after payment:", error.message);
     return res
       .status(500)
@@ -1184,15 +1094,11 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     razorpayOrderId: razorpay_order_id,
     razorpayPaymentId: razorpay_payment_id,
     stockUpdates,
+    ...(orderType === "basket" && { selectedOffer: offerId }),
   };
-
-  if (orderType === "basket") {
-    orderData.selectedOffer = offerId;
-  }
 
   const order = await Order.create(orderData);
 
-  // Increment coupon usage
   if (couponId) {
     await incrementCouponUsage(couponId, customerId);
   }
@@ -1214,7 +1120,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 export const deleteOrder = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  if (!id.match(/^[0-9a-fA-F]{24}$/)) {
+  if (!/^[0-9a-fA-F]{24}$/.test(id)) {
     return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
   }
 
@@ -1231,7 +1137,7 @@ export const updateOrder = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const updateData = req.body;
 
-  if (!id.match(/^[0-9a-fA-F]{24}$/)) {
+  if (!/^[0-9a-fA-F]{24}$/.test(id)) {
     return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
   }
 
@@ -1298,7 +1204,7 @@ export const calculatePrice = asyncHandler(async (req, res) => {
       throw new ApiError(400, "Quantity must be at least 1");
     }
 
-    const vegetable = await Vegetable.findById(item.vegetableId);
+    const vegetable = await Vegetable.findById(item.vegetableId).lean();
     if (!vegetable) {
       throw new ApiError(404, `Vegetable not found: ${item.vegetableId}`);
     }
@@ -1316,7 +1222,7 @@ export const calculatePrice = asyncHandler(async (req, res) => {
       };
 
       if (priceInfo.type === "set") {
-        calculatedItem.weight = item.weight; // "set0", "set1", etc.
+        calculatedItem.weight = item.weight;
         calculatedItem.setLabel = priceInfo.label;
         calculatedItem.setQuantity = priceInfo.setQuantity;
         calculatedItem.setUnit = priceInfo.setUnit;
@@ -1345,7 +1251,6 @@ export const calculatePrice = asyncHandler(async (req, res) => {
         subtotal,
         null
       );
-
       couponDiscount = couponValidation.couponDiscount;
       couponDetails = couponValidation.couponDetails;
     } catch (error) {
@@ -1359,18 +1264,8 @@ export const calculatePrice = asyncHandler(async (req, res) => {
 
   // Calculate final amounts
   const subtotalAfterDiscount = Math.max(0, subtotal - couponDiscount);
-  const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
-
-  let appliedDeliveryCharges = 0;
-  let freeDelivery = false;
-
-  if (subtotalAfterDiscount > 250) {
-    appliedDeliveryCharges = 0;
-    freeDelivery = true;
-  } else {
-    appliedDeliveryCharges = deliveryChargesInRupees;
-  }
-
+  const freeDelivery = subtotalAfterDiscount > FREE_DELIVERY_THRESHOLD;
+  const appliedDeliveryCharges = freeDelivery ? 0 : DELIVERY_CHARGES_RUPEES;
   const totalAmount = subtotalAfterDiscount + appliedDeliveryCharges;
 
   return res.json(
@@ -1397,7 +1292,6 @@ export const calculatePrice = asyncHandler(async (req, res) => {
 export const validateCouponForBasket = asyncHandler(async (req, res) => {
   const { offerId, offerPrice, couponCode } = req.body;
 
-  // Validation
   if (!offerId || !offerPrice) {
     throw new ApiError(400, "Offer ID and price are required");
   }
@@ -1406,13 +1300,11 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Coupon code is required");
   }
 
-  // Verify offer exists
-  const offer = await Offer.findById(offerId);
+  const offer = await Offer.findById(offerId).select("price").lean();
   if (!offer) {
     throw new ApiError(404, "Offer not found");
   }
 
-  // Validate offer price matches
   if (offer.price !== offerPrice) {
     throw new ApiError(400, "Offer price mismatch");
   }
@@ -1421,35 +1313,37 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
   let couponDiscount = 0;
 
   try {
-    // Find and validate coupon
     const coupon = await Coupon.findOne({
       code: couponCode.toUpperCase(),
       isActive: true,
-    });
+    }).lean();
 
     if (!coupon) {
       throw new Error("Invalid coupon code");
     }
 
-    // Check expiry
     if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
       throw new Error("Coupon has expired");
     }
 
-    // Check minimum order amount (against offer price)
     if (coupon.minOrderAmount && offerPrice < coupon.minOrderAmount) {
       throw new Error(
         `Minimum order amount of ₹${coupon.minOrderAmount} required for this coupon`
       );
     }
 
-    // Check usage limits
     if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
       throw new Error("Coupon usage limit reached");
     }
 
-    // Calculate discount on offer price
-    couponDiscount = coupon.calculateDiscount(offerPrice);
+    // Calculate discount inline
+    couponDiscount =
+      coupon.discountType === "percentage"
+        ? Math.min(
+            (offerPrice * coupon.discountValue) / 100,
+            coupon.maxDiscount || Infinity
+          )
+        : Math.min(coupon.discountValue, offerPrice);
 
     couponDetails = {
       code: coupon.code,
@@ -1459,7 +1353,6 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
       discount: couponDiscount,
     };
   } catch (error) {
-    // Return error in response, not as HTTP error
     couponDetails = {
       code: couponCode,
       applied: false,
@@ -1467,12 +1360,8 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
     };
   }
 
-  // Calculate final amounts
   const subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
-
-  // Basket orders always have fixed delivery charge
-  const deliveryChargesInRupees = DELIVERY_CHARGES / 100;
-  const totalAmount = subtotalAfterDiscount + deliveryChargesInRupees;
+  const totalAmount = subtotalAfterDiscount + DELIVERY_CHARGES_RUPEES;
 
   return res.json(
     new ApiResponse(
@@ -1482,64 +1371,58 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
         offerPrice,
         couponDiscount,
         subtotalAfterDiscount,
-        deliveryCharges: deliveryChargesInRupees,
+        deliveryCharges: DELIVERY_CHARGES_RUPEES,
         totalAmount,
       },
       "Coupon validation completed"
     )
   );
 });
+
 export const getOrdersByDateTimeRange = async (req, res) => {
   try {
     const { startDate, startTime, endDate, endTime } = req.query;
 
-    // console.log('Received params:', { startDate, startTime, endDate, endTime });
-
-    // Validate required parameters
     if (!startDate || !startTime || !endDate || !endTime) {
       return res.status(400).json({
         success: false,
         message: "startDate, startTime, endDate, and endTime are required",
-        example: "?startDate=2024-01-15&startTime=09:00&endDate=2024-01-20&endTime=18:00"
+        example:
+          "?startDate=2024-01-15&startTime=09:00&endDate=2024-01-20&endTime=18:00",
       });
     }
 
-    // Create start and end datetime objects
-    // Format: YYYY-MM-DDTHH:MM:SS
     const startDateTime = new Date(`${startDate}T${startTime}:00`);
     const endDateTime = new Date(`${endDate}T${endTime}:00`);
 
-    // console.log('DateTime range:', { startDateTime, endDateTime });
-
-    // Validate dates
     if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
       return res.status(400).json({
         success: false,
         message: "Invalid date or time format",
-        example: "startDate: YYYY-MM-DD, startTime: HH:MM"
+        example: "startDate: YYYY-MM-DD, startTime: HH:MM",
       });
     }
 
     if (startDateTime > endDateTime) {
       return res.status(400).json({
         success: false,
-        message: "Start date-time cannot be after end date-time"
+        message: "Start date-time cannot be after end date-time",
       });
     }
 
-    // Fetch orders within the date-time range
-    // Exclude orders that are delivered or cancelled
+    // Use lean() for better performance
     const orders = await Order.find({
       orderDate: {
         $gte: startDateTime,
-        $lte: endDateTime
+        $lte: endDateTime,
       },
       orderStatus: {
-        $nin: ['delivered', 'cancelled', 'Delivered', 'Cancelled']
-      }
-    }).populate('customerInfo').populate('selectedVegetables.vegetable');
-
-    // console.log(`Found ${orders.length} orders`);
+        $nin: ["delivered", "cancelled", "Delivered", "Cancelled"],
+      },
+    })
+      .populate("customerInfo")
+      .populate("selectedVegetables.vegetable")
+      .lean();
 
     if (!orders || orders.length === 0) {
       return res.status(200).json({
@@ -1548,100 +1431,130 @@ export const getOrdersByDateTimeRange = async (req, res) => {
         data: {
           orders: [],
           totalOrders: 0,
-          dateTimeRange: {
-            start: startDateTime,
-            end: endDateTime
-          },
+          dateTimeRange: { start: startDateTime, end: endDateTime },
           summary: {
             totalOrders: 0,
             totalRevenue: 0,
-            totalVegetablesWeight: 0,
-            uniqueVegetables: 0
+            totalVegetablesWeightKg: 0,
+            totalVegetablesPieces: 0,
+            uniqueVegetables: 0,
           },
-          vegetableWeights: {}
-        }
+          vegetableData: {},
+        },
       });
     }
 
-    // Calculate vegetable weights
-    const vegetableWeights = {};
-    
-    orders.forEach(order => {
-      order.selectedVegetables.forEach(item => {
-        const vegetableName = item.vegetable?.name || 'Unknown Vegetable';
-        const weight = item.weight; // e.g., "1kg", "500g", "250g"
-        const quantity = item.quantity;
+    // Optimized calculation
+    const vegData = {};
+    let totalRevenue = 0;
 
-        // Convert weight to kg
-        let weightInKg = 0;
-        if (weight.includes('kg')) {
-          weightInKg = parseFloat(weight) * quantity;
-        } else if (weight.includes('g')) {
-          weightInKg = (parseFloat(weight) / 1000) * quantity;
-        }
+    orders.forEach((order) => {
+      totalRevenue += order.totalAmount || 0;
 
-        // Initialize vegetable entry if it doesn't exist
-        if (!vegetableWeights[vegetableName]) {
-          vegetableWeights[vegetableName] = {
+      order.selectedVegetables.forEach((item) => {
+        const vegName = item.vegetable?.name || "Unknown";
+
+        if (!vegData[vegName]) {
+          vegData[vegName] = {
             totalWeightKg: 0,
             totalWeightG: 0,
+            totalPieces: 0,
+            totalBundles: 0,
             orders: 0,
-            breakdown: []
+            breakdown: [],
           };
         }
 
-        // Add to total weight
-        vegetableWeights[vegetableName].totalWeightKg += weightInKg;
-        vegetableWeights[vegetableName].orders += 1;
-        
-        // Add breakdown details
-        vegetableWeights[vegetableName].breakdown.push({
+        const veg = vegData[vegName];
+        const isSet = item.weight?.startsWith("set");
+
+        let weightKg = 0;
+        let pieces = 0;
+        let bundles = 0;
+        let display = "";
+
+        if (isSet) {
+          const qty = (item.setQuantity || 0) * item.quantity;
+          if (item.setUnit === "pieces") {
+            pieces = qty;
+            display = `${qty} pieces`;
+          } else if (item.setUnit === "bundles") {
+            bundles = qty;
+            display = `${qty} bundles`;
+          } else {
+            pieces = qty;
+            display = `${qty} ${item.setUnit}`;
+          }
+        } else {
+          weightKg = (WEIGHT_TO_KG[item.weight] || 0) * item.quantity;
+          display =
+            weightKg >= 1 ? `${weightKg}kg` : `${Math.round(weightKg * 1000)}g`;
+        }
+
+        veg.totalWeightKg += weightKg;
+        veg.totalPieces += pieces;
+        veg.totalBundles += bundles;
+        veg.orders++;
+
+        veg.breakdown.push({
           orderId: order.orderId,
-          weight: weight,
-          quantity: quantity,
-          totalWeight: `${weightInKg}kg`,
-          customerName: order.customerInfo?.name || 'Unknown',
-          orderDate: order.orderDate
+          itemType: isSet ? item.setUnit : "weight",
+          originalWeight: item.weight,
+          quantity: item.quantity,
+          ...(isSet && {
+            setInfo: {
+              setLabel: item.setLabel,
+              setQuantity: item.setQuantity,
+              setUnit: item.setUnit,
+            },
+          }),
+          calculatedAmount: display,
+          ...(weightKg > 0 && { weightKg }),
+          ...(pieces > 0 && { pieces }),
+          ...(bundles > 0 && { bundles }),
+          customerName: order.customerInfo?.name || "Unknown",
+          orderDate: order.orderDate,
         });
       });
     });
 
-    // Convert kg to g for better readability
-    Object.keys(vegetableWeights).forEach(vegName => {
-      const totalKg = vegetableWeights[vegName].totalWeightKg;
-      vegetableWeights[vegName].totalWeightG = Math.round(totalKg * 1000);
-      vegetableWeights[vegName].totalWeightKg = Math.round(totalKg * 100) / 100; // Round to 2 decimals
+    // Finalize calculations
+    let totalWeightKg = 0;
+    let totalPieces = 0;
+
+    Object.keys(vegData).forEach((vegName) => {
+      const veg = vegData[vegName];
+      veg.totalWeightKg = Math.round(veg.totalWeightKg * 100) / 100;
+      veg.totalWeightG = Math.round(veg.totalWeightKg * 1000);
+
+      const parts = [];
+      if (veg.totalWeightKg > 0) parts.push(`${veg.totalWeightKg}kg`);
+      if (veg.totalPieces > 0) parts.push(`${veg.totalPieces} pieces`);
+      if (veg.totalBundles > 0) parts.push(`${veg.totalBundles} bundles`);
+      veg.summary = parts.join(", ") || "No quantities";
+
+      totalWeightKg += veg.totalWeightKg;
+      totalPieces += veg.totalPieces + veg.totalBundles;
     });
 
-    // Calculate summary statistics
     const summary = {
       totalOrders: orders.length,
-      totalRevenue: orders.reduce((sum, order) => sum + (order.totalAmount || 0), 0),
-      totalVegetablesWeight: Object.values(vegetableWeights).reduce(
-        (sum, veg) => sum + veg.totalWeightKg, 0
-      ),
-      uniqueVegetables: Object.keys(vegetableWeights).length,
-      dateRange: {
-        from: startDate,
-        to: endDate
-      },
-      timeRange: {
-        from: startTime,
-        to: endTime
-      }
+      totalRevenue,
+      totalVegetablesWeightKg: Math.round(totalWeightKg * 100) / 100,
+      totalVegetablesPieces: totalPieces,
+      uniqueVegetables: Object.keys(vegData).length,
+      dateRange: { from: startDate, to: endDate },
+      timeRange: { from: startTime, to: endTime },
     };
 
     return res.status(200).json({
       success: true,
       message: "Orders retrieved successfully",
       data: {
-        dateTimeRange: {
-          start: startDateTime,
-          end: endDateTime
-        },
+        dateTimeRange: { start: startDateTime, end: endDateTime },
         summary,
-        vegetableWeights,
-        orders: orders.map(order => ({
+        vegetableData: vegData,
+        orders: orders.map((order) => ({
           _id: order._id,
           orderId: order.orderId,
           customerName: order.customerInfo?.name,
@@ -1649,22 +1562,32 @@ export const getOrdersByDateTimeRange = async (req, res) => {
           totalAmount: order.totalAmount,
           paymentStatus: order.paymentStatus,
           orderStatus: order.orderStatus,
-          vegetables: order.selectedVegetables.map(item => ({
-            name: item.vegetable?.name || 'Unknown',
-            weight: item.weight,
-            quantity: item.quantity,
-            subtotal: item.subtotal
-          }))
-        }))
-      }
+          vegetables: order.selectedVegetables.map((item) => {
+            const isSet = item.weight?.startsWith("set");
+            return {
+              name: item.vegetable?.name || "Unknown",
+              weight: item.weight,
+              quantity: item.quantity,
+              subtotal: item.subtotal,
+              type: isSet ? "set-based" : "weight-based",
+              ...(isSet && {
+                setInfo: {
+                  label: item.setLabel,
+                  quantity: item.setQuantity,
+                  unit: item.setUnit,
+                },
+              }),
+            };
+          }),
+        })),
+      },
     });
-
   } catch (error) {
     console.error("Error fetching orders by date-time range:", error);
     return res.status(500).json({
       success: false,
       message: "Failed to fetch orders",
-      error: error.message
+      error: error.message,
     });
   }
 };
