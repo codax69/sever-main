@@ -612,7 +612,7 @@ export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
 });
 
 export const getOrders = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page) ;
+  const page = parseInt(req.query.page);
   const limit = parseInt(req.query.limit);
   const skip = (page - 1) * limit;
 
@@ -1444,11 +1444,17 @@ export const getOrdersByDateTimeRange = async (req, res) => {
       });
     }
 
-    // Optimized calculation
+    // Optimized calculation - with order status check
     const vegData = {};
     let totalRevenue = 0;
 
     orders.forEach((order) => {
+      // Double-check: Skip cancelled and delivered orders
+      const status = (order.orderStatus || "").toLowerCase();
+      if (status === "cancelled" || status === "delivered") {
+        return; // Skip this order completely
+      }
+
       totalRevenue += order.totalAmount || 0;
 
       order.selectedVegetables.forEach((item) => {
