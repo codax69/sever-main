@@ -612,8 +612,8 @@ export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
 });
 
 export const getOrders = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 10;
+  const page = parseInt(req.query.page) ;
+  const limit = parseInt(req.query.limit);
   const skip = (page - 1) * limit;
 
   const filter = {};
