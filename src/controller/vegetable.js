@@ -7,9 +7,9 @@ const calculatePrices = (price1kg) => {
   const p = Number(price1kg);
   return {
     weight1kg: p,
-    weight500g: Number((p * 0.58).toFixed(0)),
-    weight250g: Number((p * 0.36).toFixed(0)),
-    weight100g: Number((p * 0.16).toFixed(0)),
+    weight500g: Number((p * 0.54).toFixed(0)),
+    weight250g: Number((p * 0.32).toFixed(0)),
+    weight100g: Number((p * 0.12).toFixed(0)),
   };
 };
 

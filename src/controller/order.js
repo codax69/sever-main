@@ -1597,3 +1597,418 @@ export const getOrdersByDateTimeRange = async (req, res) => {
     });
   }
 };
+export const getOrdersByStatus = async (req, res) => {
+  try {
+    const { status, startDate, endDate } = req.query;
+
+    // Validate status parameter
+    if (!status) {
+      return res.status(400).json({
+        success: false,
+        message: "Status parameter is required",
+        example:
+          "?status=pending or ?status=confirmed&startDate=2024-01-15&endDate=2024-01-20",
+        availableStatuses: [
+          "pending",
+          "processing",
+          "confirmed",
+          "delivered",
+          "cancelled",
+        ],
+      });
+    }
+
+    // Build query object
+    const query = {
+      orderStatus: new RegExp(`^${status}$`, "i"), // Case-insensitive match
+    };
+
+    // Add date range filter if provided
+    if (startDate || endDate) {
+      query.orderDate = {};
+
+      if (startDate) {
+        const start = new Date(`${startDate}T00:00:00`);
+        if (isNaN(start.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid startDate format. Use YYYY-MM-DD",
+          });
+        }
+        query.orderDate.$gte = start;
+      }
+
+      if (endDate) {
+        const end = new Date(`${endDate}T23:59:59`);
+        if (isNaN(end.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid endDate format. Use YYYY-MM-DD",
+          });
+        }
+        query.orderDate.$lte = end;
+      }
+    }
+
+    // Fetch orders with populated data
+    const orders = await Order.find(query)
+      .populate("customerInfo")
+      .populate("selectedVegetables.vegetable")
+      .sort({ orderDate: -1 }) // Most recent first
+      .lean();
+
+    if (!orders || orders.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: `No orders found with status: ${status}`,
+        data: {
+          orders: [],
+          totalOrders: 0,
+          status: status,
+          summary: {
+            totalOrders: 0,
+            totalRevenue: 0,
+            totalVegetablesWeightKg: 0,
+            totalVegetablesPieces: 0,
+            uniqueVegetables: 0,
+          },
+          vegetableData: {},
+        },
+      });
+    }
+
+    // Calculate vegetable data and totals
+    const vegData = {};
+    let totalRevenue = 0;
+
+    orders.forEach((order) => {
+      totalRevenue += order.totalAmount || 0;
+
+      order.selectedVegetables.forEach((item) => {
+        const vegName = item.vegetable?.name || "Unknown";
+
+        if (!vegData[vegName]) {
+          vegData[vegName] = {
+            totalWeightKg: 0,
+            totalWeightG: 0,
+            totalPieces: 0,
+            totalBundles: 0,
+            orders: 0,
+            breakdown: [],
+          };
+        }
+
+        const veg = vegData[vegName];
+        const isSet = item.weight?.startsWith("set");
+
+        let weightKg = 0;
+        let pieces = 0;
+        let bundles = 0;
+        let display = "";
+
+        if (isSet) {
+          const qty = (item.setQuantity || 0) * item.quantity;
+          if (item.setUnit === "pieces") {
+            pieces = qty;
+            display = `${qty} pieces`;
+          } else if (item.setUnit === "bundles") {
+            bundles = qty;
+            display = `${qty} bundles`;
+          } else {
+            pieces = qty;
+            display = `${qty} ${item.setUnit}`;
+          }
+        } else {
+          weightKg = (WEIGHT_TO_KG[item.weight] || 0) * item.quantity;
+          display =
+            weightKg >= 1 ? `${weightKg}kg` : `${Math.round(weightKg * 1000)}g`;
+        }
+
+        veg.totalWeightKg += weightKg;
+        veg.totalPieces += pieces;
+        veg.totalBundles += bundles;
+        veg.orders++;
+
+        veg.breakdown.push({
+          orderId: order.orderId,
+          itemType: isSet ? item.setUnit : "weight",
+          originalWeight: item.weight,
+          quantity: item.quantity,
+          ...(isSet && {
+            setInfo: {
+              setLabel: item.setLabel,
+              setQuantity: item.setQuantity,
+              setUnit: item.setUnit,
+            },
+          }),
+          calculatedAmount: display,
+          ...(weightKg > 0 && { weightKg }),
+          ...(pieces > 0 && { pieces }),
+          ...(bundles > 0 && { bundles }),
+          customerName: order.customerInfo?.name || "Unknown",
+          orderDate: order.orderDate,
+        });
+      });
+    });
+
+    // Finalize vegetable calculations
+    let totalWeightKg = 0;
+    let totalPieces = 0;
+
+    Object.keys(vegData).forEach((vegName) => {
+      const veg = vegData[vegName];
+      veg.totalWeightKg = Math.round(veg.totalWeightKg * 100) / 100;
+      veg.totalWeightG = Math.round(veg.totalWeightKg * 1000);
+
+      const parts = [];
+      if (veg.totalWeightKg > 0) parts.push(`${veg.totalWeightKg}kg`);
+      if (veg.totalPieces > 0) parts.push(`${veg.totalPieces} pieces`);
+      if (veg.totalBundles > 0) parts.push(`${veg.totalBundles} bundles`);
+      veg.summary = parts.join(", ") || "No quantities";
+
+      totalWeightKg += veg.totalWeightKg;
+      totalPieces += veg.totalPieces + veg.totalBundles;
+    });
+
+    const summary = {
+      totalOrders: orders.length,
+      totalRevenue: Math.round(totalRevenue * 100) / 100,
+      totalVegetablesWeightKg: Math.round(totalWeightKg * 100) / 100,
+      totalVegetablesPieces: totalPieces,
+      uniqueVegetables: Object.keys(vegData).length,
+      status: status,
+      ...(startDate && { dateFrom: startDate }),
+      ...(endDate && { dateTo: endDate }),
+    };
+
+    return res.status(200).json({
+      success: true,
+      message: `Orders with status '${status}' retrieved successfully`,
+      data: {
+        summary,
+        vegetableData: vegData,
+        orders: orders.map((order) => ({
+          _id: order._id,
+          orderId: order.orderId,
+          customerName: order.customerInfo?.name || "Unknown",
+          customerPhone: order.customerInfo?.phone,
+          orderDate: order.orderDate,
+          totalAmount: order.totalAmount,
+          paymentStatus: order.paymentStatus,
+          orderStatus: order.orderStatus,
+          deliveryAddress: order.deliveryAddress,
+          vegetables: order.selectedVegetables.map((item) => {
+            const isSet = item.weight?.startsWith("set");
+            return {
+              name: item.vegetable?.name || "Unknown",
+              weight: item.weight,
+              quantity: item.quantity,
+              subtotal: item.subtotal,
+              type: isSet ? "set-based" : "weight-based",
+              ...(isSet && {
+                setInfo: {
+                  label: item.setLabel,
+                  quantity: item.setQuantity,
+                  unit: item.setUnit,
+                },
+              }),
+            };
+          }),
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching orders by status:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch orders by status",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get orders with multiple status filters
+ * Query params:
+ * - statuses (required): comma-separated list (e.g., pending,processing,confirmed)
+ * - startDate (optional): YYYY-MM-DD
+ * - endDate (optional): YYYY-MM-DD
+ */
+export const getOrdersByMultipleStatuses = async (req, res) => {
+  try {
+    const { statuses, startDate, endDate } = req.query;
+
+    if (!statuses) {
+      return res.status(400).json({
+        success: false,
+        message: "Statuses parameter is required",
+        example: "?statuses=pending,processing,confirmed",
+      });
+    }
+
+    // Parse comma-separated statuses
+    const statusArray = statuses.split(",").map((s) => s.trim().toLowerCase());
+
+    // Build query
+    const query = {
+      orderStatus: {
+        $in: statusArray.map((s) => new RegExp(`^${s}$`, "i")),
+      },
+    };
+
+    // Add date range if provided
+    if (startDate || endDate) {
+      query.orderDate = {};
+      if (startDate) {
+        const start = new Date(`${startDate}T00:00:00`);
+        if (!isNaN(start.getTime())) {
+          query.orderDate.$gte = start;
+        }
+      }
+      if (endDate) {
+        const end = new Date(`${endDate}T23:59:59`);
+        if (!isNaN(end.getTime())) {
+          query.orderDate.$lte = end;
+        }
+      }
+    }
+
+    const orders = await Order.find(query)
+      .populate("customerInfo")
+      .populate("selectedVegetables.vegetable")
+      .sort({ orderDate: -1 })
+      .lean();
+
+    // Group orders by status
+    const ordersByStatus = {};
+    statusArray.forEach((s) => {
+      ordersByStatus[s] = [];
+    });
+
+    orders.forEach((order) => {
+      const orderStatus = order.orderStatus.toLowerCase();
+      if (ordersByStatus[orderStatus]) {
+        ordersByStatus[orderStatus].push(order);
+      }
+    });
+
+    // Calculate totals
+    let totalRevenue = 0;
+    orders.forEach((order) => {
+      totalRevenue += order.totalAmount || 0;
+    });
+
+    const statusCounts = {};
+    Object.keys(ordersByStatus).forEach((status) => {
+      statusCounts[status] = ordersByStatus[status].length;
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Orders retrieved successfully",
+      data: {
+        totalOrders: orders.length,
+        totalRevenue: Math.round(totalRevenue * 100) / 100,
+        statusCounts,
+        orders: orders.map((order) => ({
+          _id: order._id,
+          orderId: order.orderId,
+          customerName: order.customerInfo?.name || "Unknown",
+          orderDate: order.orderDate,
+          totalAmount: order.totalAmount,
+          orderStatus: order.orderStatus,
+          paymentStatus: order.paymentStatus,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching orders by multiple statuses:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch orders",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get order status statistics
+ * Shows count and total revenue for each order status
+ */
+export const getOrderStatusStats = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    // Build date filter
+    const dateFilter = {};
+    if (startDate || endDate) {
+      dateFilter.orderDate = {};
+      if (startDate) {
+        const start = new Date(`${startDate}T00:00:00`);
+        if (!isNaN(start.getTime())) {
+          dateFilter.orderDate.$gte = start;
+        }
+      }
+      if (endDate) {
+        const end = new Date(`${endDate}T23:59:59`);
+        if (!isNaN(end.getTime())) {
+          dateFilter.orderDate.$lte = end;
+        }
+      }
+    }
+
+    // Aggregate orders by status
+    const stats = await Order.aggregate([
+      ...(Object.keys(dateFilter).length > 0 ? [{ $match: dateFilter }] : []),
+      {
+        $group: {
+          _id: { $toLower: "$orderStatus" },
+          count: { $sum: 1 },
+          totalRevenue: { $sum: "$totalAmount" },
+          avgOrderValue: { $avg: "$totalAmount" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          status: "$_id",
+          count: 1,
+          totalRevenue: { $round: ["$totalRevenue", 2] },
+          avgOrderValue: { $round: ["$avgOrderValue", 2] },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    // Calculate overall totals
+    const overallTotal = stats.reduce(
+      (acc, stat) => {
+        acc.totalOrders += stat.count;
+        acc.totalRevenue += stat.totalRevenue;
+        return acc;
+      },
+      { totalOrders: 0, totalRevenue: 0 }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Order status statistics retrieved successfully",
+      data: {
+        overallTotal: {
+          totalOrders: overallTotal.totalOrders,
+          totalRevenue: Math.round(overallTotal.totalRevenue * 100) / 100,
+        },
+        statusBreakdown: stats,
+        ...(startDate && { dateFrom: startDate }),
+        ...(endDate && { dateTo: endDate }),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching order status statistics:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch statistics",
+      error: error.message,
+    });
+  }
+};
