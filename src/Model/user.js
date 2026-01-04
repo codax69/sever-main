@@ -5,230 +5,130 @@ const userSchema = new mongoose.Schema(
   {
     username: {
       type: String,
+      required: [true, "Username is required"],
       trim: true,
+      minlength: [3, "Username must be at least 3 characters long"],
+      maxlength: [20, "Username cannot exceed 20 characters"],
     },
     email: {
       type: String,
-      required: true,
-      unique: true,
+      required: [true, "Email is required"],
       lowercase: true,
       trim: true,
+      match: [
+        /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/,
+        "Please enter a valid email",
+      ],
     },
     password: {
       type: String,
-      select: false,
-    },
-    phone: {
-      type: String,
-      trim: true,
+      required: [true, "Password is required"],
+      minlength: [6, "Password must be at least 6 characters long"],
+      select: false, // Don't include password in queries by default
     },
     role: {
       type: String,
-      enum: ["user", "admin", "editor", "delivery_partner", "packaging"],
+      enum: ["user", "admin", "moderator"],
       default: "user",
-      required: true,
-    },
-    // Role-specific fields
-    roleDetails: {
-      // For delivery partners
-      vehicleType: {
-        type: String,
-        enum: ["bike", "car", "van", "truck"],
-      },
-      vehicleNumber: String,
-      licenseNumber: String,
-      isAvailable: {
-        type: Boolean,
-        default: false,
-      },
-      currentLocation: {
-        type: {
-          type: String,
-          enum: ["Point"],
-          default: "Point",
-        },
-        coordinates: {
-          type: [Number], // [longitude, latitude]
-          default: [0, 0],
-        },
-      },
-      deliveryZones: [String],
-      
-      // For packaging staff
-      warehouseId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "Warehouse",
-      },
-      shift: {
-        type: String,
-        enum: ["morning", "afternoon", "evening", "night"],
-      },
-      packagingStation: String,
-      
-      // For editors
-      department: {
-        type: String,
-        enum: ["content", "product", "inventory", "orders"],
-      },
-      permissions: [String],
-    },
-    // Google OAuth fields
-    googleId: {
-      type: String,
-      unique: true,
-      sparse: true,
-    },
-    picture: {
-      type: String,
-    },
-    authProvider: {
-      type: String,
-      enum: ["local", "google"],
-      default: "local",
-    },
-    isEmailVerified: {
-      type: Boolean,
-      default: false,
-    },
-    isPhoneVerified: {
-      type: Boolean,
-      default: false,
-    },
-    // Account status
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
-    isApproved: {
-      type: Boolean,
-      default: false, // For delivery partners and packaging staff
-    },
-    approvedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-    },
-    approvedAt: Date,
-    rejectionReason: String,
-    // Session management
-    refreshToken: {
-      type: String,
-      select: false,
-    },
-    accessToken: {
-      type: String,
-      select: false,
     },
     isLoggedIn: {
       type: Boolean,
       default: false,
     },
-    lastLogin: Date,
     logCount: {
       type: Number,
       default: 0,
     },
-    // Performance metrics (for delivery partners and packaging)
-    performanceMetrics: {
-      totalDeliveries: {
-        type: Number,
-        default: 0,
-      },
-      successfulDeliveries: {
-        type: Number,
-        default: 0,
-      },
-      totalPackages: {
-        type: Number,
-        default: 0,
-      },
-      rating: {
-        type: Number,
-        default: 0,
-        min: 0,
-        max: 5,
-      },
-      totalRatings: {
-        type: Number,
-        default: 0,
-      },
+    refreshToken: {
+      type: String,
+      select: false, 
     },
-    // Address (for users)
-    addresses: [{
-      type: {
-        type: String,
-        enum: ["home", "work", "other"],
-        default: "home",
-      },
-      street: String,
-      city: String,
-      state: String,
-      zipCode: String,
-      country: String,
-      isDefault: {
-        type: Boolean,
-        default: false,
-      },
-    }],
+    accessToken:{
+     type:String
+    },
+    lastLogin: {
+      type: Date,
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+    profilePicture: {
+      type: String,
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
   },
   {
     timestamps: true,
+    toJSON: {
+      transform: function (doc, ret) {
+        delete ret.password;
+        delete ret.refreshToken;
+        delete ret.__v;
+        return ret;
+      },
+    },
   }
 );
 
-// Index for geospatial queries (delivery partners)
-userSchema.index({ "roleDetails.currentLocation": "2dsphere" });
+// Create unique compound indexes for better performance and uniqueness
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ username: 1 }, { unique: true });
+userSchema.index({ refreshToken: 1 }, { sparse: true }); // Sparse index since not all users will have refresh tokens
 
 // Hash password before saving
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   
-  if (this.password) {
-    this.password = await bcrypt.hash(this.password, 12);
+  try {
+    const salt = await bcrypt.genSalt(12);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+  } catch (error) {
+    next(error);
   }
-  next();
-});
-
-// Auto-approve regular users
-userSchema.pre("save", function (next) {
-  if (this.isNew && this.role === "user") {
-    this.isApproved = true;
-  }
-  next();
 });
 
 // Compare password method
 userSchema.methods.comparePassword = async function (candidatePassword) {
-  if (!this.password) {
-    return false;
+  try {
+    return await bcrypt.compare(candidatePassword, this.password);
+  } catch (error) {
+    throw error;
   }
-  return await bcrypt.compare(candidatePassword, this.password);
 };
 
-// Check if user has password set
-userSchema.methods.hasPassword = function () {
-  return !!this.password;
+// Method to check if user can login
+userSchema.methods.canLogin = function () {
+  return this.isActive && this.emailVerified;
 };
 
-// Check if user has specific permission
-userSchema.methods.hasPermission = function (permission) {
-  if (this.role === "admin") return true; // Admin has all permissions
-  if (this.role === "editor" && this.roleDetails?.permissions) {
-    return this.roleDetails.permissions.includes(permission);
-  }
-  return false;
+// Static method to find user by email with password
+userSchema.statics.findByEmail = function (email) {
+  return this.findOne({ email }).select("+password");
 };
 
-// Get role display name
-userSchema.methods.getRoleDisplayName = function () {
-  const roleNames = {
-    user: "Customer",
-    admin: "Administrator",
-    editor: "Editor",
-    delivery_partner: "Delivery Partner",
-    packaging: "Packaging Staff",
+// Virtual for user's full profile
+userSchema.virtual("profile").get(function () {
+  return {
+    id: this._id,
+    username: this.username,
+    email: this.email,
+    role: this.role,
+    isActive: this.isActive,
+    emailVerified: this.emailVerified,
+    profilePicture: this.profilePicture,
+    lastLogin: this.lastLogin,
+    createdAt: this.createdAt,
   };
-  return roleNames[this.role] || this.role;
-};
+});
 
 const User = mongoose.model("User", userSchema);
 

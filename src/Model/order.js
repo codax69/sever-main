@@ -36,6 +36,7 @@ const orderSchema = new mongoose.Schema(
         weight: {
           type: String,
           required: true,
+          // REMOVED enum constraint to support both weight and set formats
           validate: {
             validator: function (v) {
               // Allow weight formats: 1kg, 500g, 250g, 100g, etc.
@@ -69,7 +70,7 @@ const orderSchema = new mongoose.Schema(
           type: Boolean,
           default: false,
         },
-        // Fields for set-based pricing
+        // NEW: Fields for set-based pricing
         setIndex: {
           type: Number,
           min: 0,
@@ -109,6 +110,7 @@ const orderSchema = new mongoose.Schema(
     },
 
     // ===== COUPON FIELDS =====
+    // Coupon code applied to the order
     couponCode: {
       type: String,
       uppercase: true,
@@ -116,12 +118,14 @@ const orderSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Reference to the coupon document
     couponId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Coupon",
       default: null,
     },
 
+    // Discount amount from coupon
     couponDiscount: {
       type: Number,
       min: [0, "Coupon discount cannot be negative"],
@@ -129,11 +133,14 @@ const orderSchema = new mongoose.Schema(
     },
 
     // Subtotal after applying coupon discount
+    // For custom orders: vegetablesTotal - couponDiscount
+    // For basket orders: offerPrice - couponDiscount
     subtotalAfterDiscount: {
       type: Number,
       required: true,
       min: [0, "Subtotal after discount cannot be negative"],
     },
+    // ===== END COUPON FIELDS =====
 
     // Discount applied (if basket has special pricing)
     discount: {
@@ -159,8 +166,9 @@ const orderSchema = new mongoose.Schema(
     orderId: {
       type: String,
       required: true,
-      unique: true, // ✅ This creates index automatically
+      unique: true,
       trim: true,
+      index: true,
     },
 
     paymentMethod: {
@@ -181,17 +189,6 @@ const orderSchema = new mongoose.Schema(
       default: "placed",
     },
 
-    DeliveryTimeSlot: {
-      type: String,
-      enum: ["8AM-10AM", "4PM-6PM"],
-    },
-
-    specialInstructions: {
-      type: String,
-      trim: true,
-      default: null,
-    },
-
     razorpayOrderId: {
       type: String,
       default: null,
@@ -202,19 +199,16 @@ const orderSchema = new mongoose.Schema(
       default: null,
     },
 
+    // NEW: Stock updates log for tracking
     stockUpdates: {
       type: Array,
       default: [],
     },
   },
-  { 
-    timestamps: true,
-    toJSON: { virtuals: true },
-    toObject: { virtuals: true }
-  }
+  { timestamps: true }
 );
 
-// ===== VIRTUALS =====
+// Virtuals
 orderSchema.virtual("totalItems").get(function () {
   return this.selectedVegetables.reduce((sum, item) => sum + item.quantity, 0);
 });
@@ -223,20 +217,25 @@ orderSchema.virtual("uniqueVegetablesCount").get(function () {
   return this.selectedVegetables.length;
 });
 
+// Virtual to check if coupon was applied
 orderSchema.virtual("hasCoupon").get(function () {
   return this.couponDiscount > 0 && this.couponCode != null;
 });
 
+// Virtual to calculate total savings
 orderSchema.virtual("totalSavings").get(function () {
   let savings = this.couponDiscount || 0;
-  const DELIVERY_CHARGES = 30;
+
+  // Add delivery charges savings if free delivery was applied
+  const DELIVERY_CHARGES = 30; // Import from your const.js if needed
   if (this.deliveryCharges === 0 && this.subtotalAfterDiscount > 250) {
     savings += DELIVERY_CHARGES;
   }
+
   return savings;
 });
 
-// ===== PRE-SAVE VALIDATION =====
+// Pre-save validation
 orderSchema.pre("save", function (next) {
   // Validate vegetables total
   const calculatedVegTotal = this.selectedVegetables.reduce(
@@ -289,20 +288,15 @@ orderSchema.pre("save", function (next) {
   next();
 });
 
-// ===== INDEXES =====
-// Compound indexes for common queries
+// Indexes for better query performance
 orderSchema.index({ customerInfo: 1, createdAt: -1 });
-orderSchema.index({ orderStatus: 1, createdAt: -1 });
-orderSchema.index({ orderType: 1, orderStatus: 1 });
-
-// Single field indexes
-orderSchema.index({ paymentStatus: 1 });
+orderSchema.index({ orderStatus: 1 });
+orderSchema.index({ orderType: 1 });
 orderSchema.index({ couponCode: 1 });
 orderSchema.index({ orderDate: 1 });
-orderSchema.index({ createdAt: -1 });
 
-// Note: orderId already has unique: true, which creates an index automatically
-// REMOVED: orderSchema.index({ orderId: 1 }); - This would be a duplicate
+orderSchema.set("toJSON", { virtuals: true });
+orderSchema.set("toObject", { virtuals: true });
 
 const Order = mongoose.model("Order", orderSchema);
 export default Order;

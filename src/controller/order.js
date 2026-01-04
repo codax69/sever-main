@@ -7,7 +7,6 @@ import { ApiResponse } from "../utility/ApiResponse.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { ApiError } from "../utility/ApiError.js";
 import { incrementCouponUsage } from "./coupon.js";
-import { processOrderInvoice } from "./invoice.js";
 import Razorpay from "razorpay";
 import crypto from "crypto";
 import "dotenv/config";
@@ -17,6 +16,10 @@ const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_SECRET,
 });
+
+// ============================================================================
+// CONSTANTS & CONFIGS (Memory efficient)
+// ============================================================================
 
 const WEIGHT_TO_KG = Object.freeze({
   "1kg": 1,
@@ -42,6 +45,10 @@ const VALID_ORDER_STATUSES = Object.freeze([
 
 const DELIVERY_CHARGES_RUPEES = DELIVERY_CHARGES / 100;
 const FREE_DELIVERY_THRESHOLD = 250;
+
+// ============================================================================
+// PRICING HELPER FUNCTIONS (Optimized)
+// ============================================================================
 
 function getPriceForSet(vegetable, setIndex) {
   const sets = vegetable.setPricing?.sets;
@@ -108,6 +115,10 @@ function getPrice(vegetable, weightOrSet, quantity = 1) {
     weight: weightOrSet,
   };
 }
+
+// ============================================================================
+// STOCK CALCULATION FUNCTIONS (Optimized)
+// ============================================================================
 
 function calculateKgFromWeight(weight, quantity) {
   return (WEIGHT_TO_KG[weight] || 0) * quantity;
@@ -272,6 +283,10 @@ async function restoreVegetableStock(selectedVegetables) {
 
   return stockUpdates;
 }
+
+// ============================================================================
+// ORDER PROCESSING HELPER FUNCTIONS (Optimized)
+// ============================================================================
 
 async function processCustomer(customerInfo) {
   if (typeof customerInfo === "string") {
@@ -576,6 +591,10 @@ async function validateAndApplyCoupon(couponCode, subtotal, customerId = null) {
   };
 }
 
+// ============================================================================
+// EXPORTED CONTROLLER FUNCTIONS
+// ============================================================================
+
 export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
@@ -635,7 +654,7 @@ export const getOrders = asyncHandler(async (req, res) => {
 export const getOrderById = asyncHandler(async (req, res) => {
   const { orderId } = req.params;
 
-  if (!/^ORD\d{16}$/.test(orderId)) {
+  if (!/^ORD\d{11}$/.test(orderId)) {
     return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
   }
 
@@ -871,29 +890,6 @@ export const addOrder = asyncHandler(async (req, res) => {
       .populate("selectedOffer")
       .populate("selectedVegetables.vegetable");
 
-    // Send order success email and invoice after successful order placement
-    try {
-      // Send order success confirmation email
-      const orderSuccessResult = await processOrderInvoice(order._id, {
-        sendEmail: true,
-        emailType: "orderConfirmation",
-        includeAnalytics: false,
-      });
-
-      // Send invoice email
-      const invoiceResult = await processOrderInvoice(order._id, {
-        sendEmail: true,
-        emailType: "invoice",
-        includeAnalytics: false,
-      });
-    } catch (emailError) {
-      console.error(
-        `Failed to send emails for order ${orderId}:`,
-        emailError.message
-      );
-      // Don't fail the order if emails fail - just log the error
-    }
-
     return res.json(
       new ApiResponse(201, populatedOrder, "Order placed successfully with COD")
     );
@@ -960,6 +956,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       .status(400)
       .json(new ApiResponse(400, null, "Missing offer for basket order"));
   }
+
   // Verify signature
   const body = `${razorpay_order_id}|${razorpay_payment_id}`;
   const expectedSignature = crypto
@@ -1111,36 +1108,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     .populate("selectedOffer")
     .populate("selectedVegetables.vegetable");
 
-  // Send order success email and invoice after successful payment verification
-  try {
-    // console.log(
-    //   `Sending order success email and invoice for online order: ${orderId}`
-    // );
-
-    // Send order success confirmation email
-    const orderSuccessResult = await processOrderInvoice(order._id, {
-      sendEmail: true,
-      emailType: "orderConfirmation",
-      includeAnalytics: false,
-    });
-
-    // Send invoice email
-    const invoiceResult = await processOrderInvoice(order._id, {
-      sendEmail: true,
-      emailType: "invoice",
-      includeAnalytics: false,
-    });
-
-    // console.log(`Order success email sent: ${orderSuccessResult.emailSent}`);
-    // console.log(`Invoice email sent: ${invoiceResult.emailSent}`);
-  } catch (emailError) {
-    console.error(
-      `Failed to send emails for online order ${orderId}:`,
-      emailError.message
-    );
-    // Don't fail the order if emails fail - just log the error
-  }
-
   res.json(
     new ApiResponse(
       200,
@@ -1198,6 +1165,7 @@ export const updateOrder = asyncHandler(async (req, res) => {
 
   res.json(new ApiResponse(200, order, "Order updated successfully"));
 });
+
 export const getRazorpayKey = asyncHandler(async (req, res) => {
   if (!process.env.RAZORPAY_KEY_ID) {
     return res
@@ -1858,6 +1826,14 @@ export const getOrdersByStatus = async (req, res) => {
     });
   }
 };
+
+/**
+ * Get orders with multiple status filters
+ * Query params:
+ * - statuses (required): comma-separated list (e.g., pending,processing,confirmed)
+ * - startDate (optional): YYYY-MM-DD
+ * - endDate (optional): YYYY-MM-DD
+ */
 export const getOrdersByMultipleStatuses = async (req, res) => {
   try {
     const { statuses, startDate, endDate } = req.query;
@@ -1955,6 +1931,10 @@ export const getOrdersByMultipleStatuses = async (req, res) => {
   }
 };
 
+/**
+ * Get order status statistics
+ * Shows count and total revenue for each order status
+ */
 export const getOrderStatusStats = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
