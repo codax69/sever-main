@@ -67,7 +67,7 @@ const shuffleArray = (array) => {
   return arr;
 };
 
-// Quick Sort implementation for custom sorting - O(n log n) average
+
 const quickSort = (arr, compareFn) => {
   if (arr.length <= 1) return arr;
   
@@ -79,7 +79,7 @@ const quickSort = (arr, compareFn) => {
   return [...quickSort(left, compareFn), ...middle, ...quickSort(right, compareFn)];
 };
 
-// Binary search for finding vegetable by ID in sorted array - O(log n)
+
 const binarySearch = (arr, id) => {
   let left = 0;
   let right = arr.length - 1;
@@ -95,7 +95,7 @@ const binarySearch = (arr, id) => {
   return null;
 };
 
-// Heap-based priority queue for featured/popular items - O(log n) operations
+
 class MinHeap {
   constructor(compareFn) {
     this.heap = [];
