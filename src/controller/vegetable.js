@@ -2,35 +2,32 @@ import Vegetable from "../Model/vegetable.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 
-// Cache for frequently accessed data
-const cache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-// Optimized price calculation using bit operations for rounding
+// Helper function to calculate prices based on 1kg price
 const calculatePrices = (price1kg) => {
-  const p = price1kg;
+  const p = Number(price1kg);
   return {
     weight1kg: p,
-    weight500g: (p * 0.54) | 0,
-    weight250g: (p * 0.32) | 0,
-    weight100g: (p * 0.12) | 0,
+    weight500g: Number((p * 0.54).toFixed(0)),
+    weight250g: Number((p * 0.32).toFixed(0)),
+    weight100g: Number((p * 0.12).toFixed(0)),
   };
 };
 
 const calculateMarketPrices = (price1kg) => {
-  const p = price1kg;
+  const p = Number(price1kg);
   return {
     weight1kg: p,
-    weight500g: (p * 0.60) | 0,
-    weight250g: (p * 0.40) | 0,
-    weight100g: (p * 0.20) | 0,
+    weight500g: Number((p * 0.60).toFixed(0)),
+    weight250g: Number((p * 0.40).toFixed(0)),
+    weight100g: Number((p * 0.20).toFixed(0)),
   };
 };
 
-// Optimized formatting using object pooling pattern
+// Helper to format vegetable data with options
 const formatVegetableWithOptions = (veg) => {
-  const vegObject = veg.toObject ? veg.toObject() : veg;
+  const vegObject = veg.toObject();
   
+  // Check if set pricing is enabled
   if (vegObject.setPricing?.enabled && vegObject.setPricing.sets?.length > 0) {
     return {
       ...vegObject,
@@ -45,6 +42,7 @@ const formatVegetableWithOptions = (veg) => {
     };
   }
   
+  // Weight-based pricing
   return {
     ...vegObject,
     pricingType: 'weight',
@@ -67,7 +65,7 @@ const shuffleArray = (array) => {
   return arr;
 };
 
-
+// Quick Sort implementation for custom sorting - O(n log n) average
 const quickSort = (arr, compareFn) => {
   if (arr.length <= 1) return arr;
   
@@ -79,7 +77,7 @@ const quickSort = (arr, compareFn) => {
   return [...quickSort(left, compareFn), ...middle, ...quickSort(right, compareFn)];
 };
 
-
+// Binary search for finding vegetable by ID in sorted array - O(log n)
 const binarySearch = (arr, id) => {
   let left = 0;
   let right = arr.length - 1;
@@ -95,7 +93,7 @@ const binarySearch = (arr, id) => {
   return null;
 };
 
-
+// Heap-based priority queue for featured/popular items - O(log n) operations
 class MinHeap {
   constructor(compareFn) {
     this.heap = [];
@@ -122,79 +120,20 @@ class MinHeap {
 }
 
 export const getVegetables = asyncHandler(async (req, res) => {
-  const { sortBy, order, featured, popular, random, inStock, limit } = req.query;
-  
-  const cacheKey = JSON.stringify(req.query);
-  const cached = cache.get(cacheKey);
-  
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return res.json(new ApiResponse(200, cached.data, "Vegetables fetched from cache"));
-  }
-  
-  let query = Vegetable.find();
-  
-  if (featured === 'true') {
-    query = query.where('isFeatured').equals(true);
-  }
-  
-  if (inStock === 'true') {
-    query = query.where('outOfStock').equals(false);
-  }
-  
-  let vegetables = await query.lean();
-  
-  if (random === 'true') {
-    vegetables = shuffleArray(vegetables);
-  } else if (popular === 'true') {
-    vegetables = quickSort(vegetables, (a, b) => {
-      return (b.salesCount || 0) - (a.salesCount || 0) || (b.views || 0) - (a.views || 0);
-    });
-  } else if (sortBy) {
-    const sortOrder = order === 'desc' ? -1 : 1;
-    vegetables = quickSort(vegetables, (a, b) => {
-      const aVal = a[sortBy] || 0;
-      const bVal = b[sortBy] || 0;
-      return sortOrder * (aVal > bVal ? 1 : aVal < bVal ? -1 : 0);
-    });
-  }
-  
-  if (limit) {
-    vegetables = vegetables.slice(0, parseInt(limit));
-  }
-  
+  const vegetables = await Vegetable.find();
   const vegetablesWithOptions = vegetables.map(veg => formatVegetableWithOptions(veg));
-  
-  cache.set(cacheKey, {
-    data: vegetablesWithOptions,
-    timestamp: Date.now()
-  });
-  
   res.json(new ApiResponse(200, vegetablesWithOptions, "Vegetables fetched successfully"));
 });
 
 export const getVegetableById = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  
-  const cacheKey = `veg:${id}`;
-  const cached = cache.get(cacheKey);
-  
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return res.json(new ApiResponse(200, cached.data, "Vegetable fetched from cache"));
-  }
-  
-  const vegetable = await Vegetable.findById(id).lean();
+  const vegetable = await Vegetable.findById(id);
   
   if (!vegetable) {
     return res.status(404).json(new ApiResponse(404, null, "Vegetable not found"));
   }
   
   const vegetableWithOptions = formatVegetableWithOptions(vegetable);
-  
-  cache.set(cacheKey, {
-    data: vegetableWithOptions,
-    timestamp: Date.now()
-  });
-  
   res.json(new ApiResponse(200, vegetableWithOptions, "Vegetable fetched successfully"));
 });
 
@@ -225,6 +164,7 @@ export const addVegetable = asyncHandler(async (req, res) => {
     description,
   };
 
+  // SET-BASED PRICING MODE
   if (setPricingEnabled === true) {
     if (!sets || !Array.isArray(sets) || sets.length === 0) {
       return res.status(400).json(new ApiResponse(400, null, "Sets array is required for set pricing"));
@@ -234,6 +174,7 @@ export const addVegetable = asyncHandler(async (req, res) => {
       return res.status(400).json(new ApiResponse(400, null, "Valid stockPieces is required for set pricing"));
     }
 
+    // Validate each set
     for (const set of sets) {
       if (set.quantity === undefined || set.price === undefined) {
         return res.status(400).json(new ApiResponse(400, null, "Each set must include quantity and price"));
@@ -260,6 +201,7 @@ export const addVegetable = asyncHandler(async (req, res) => {
     vegetableData.stockPieces = parseFloat(stockPieces);
     vegetableData.outOfStock = parseFloat(stockPieces) === 0;
 
+    // Set dummy values for required weight fields (schema requirement)
     vegetableData.prices = {
       weight1kg: 0,
       weight500g: 0,
@@ -273,7 +215,9 @@ export const addVegetable = asyncHandler(async (req, res) => {
       weight100g: 0,
     };
     vegetableData.stockKg = 0;
-  } else {
+  } 
+  // WEIGHT-BASED PRICING MODE
+  else {
     if (price1kg === undefined || marketPrice1kg === undefined || stockKg === undefined) {
       return res.status(400).json(new ApiResponse(400, null, "Missing required fields: price1kg, marketPrice1kg, stockKg"));
     }
@@ -303,8 +247,6 @@ export const addVegetable = asyncHandler(async (req, res) => {
   const vegetable = new Vegetable(vegetableData);
   await vegetable.save();
 
-  cache.clear();
-
   res.json(new ApiResponse(201, vegetable, "Vegetable added successfully"));
 });
 
@@ -315,8 +257,6 @@ export const deleteVegetable = asyncHandler(async (req, res) => {
   if (!result) {
     return res.status(404).json(new ApiResponse(404, null, "Vegetable not found"));
   }
-  
-  cache.clear();
   
   res.json(new ApiResponse(200, result, "Vegetable deleted successfully"));
 });
@@ -337,6 +277,7 @@ export const updateVegetable = asyncHandler(async (req, res) => {
     stockPieces,
   } = req.body;
 
+  // Fetch existing vegetable
   const existingVeg = await Vegetable.findById(id);
   if (!existingVeg) {
     return res.status(404).json(new ApiResponse(404, null, "Vegetable not found"));
@@ -344,12 +285,15 @@ export const updateVegetable = asyncHandler(async (req, res) => {
 
   const updateData = {};
 
+  // HANDLE PRICING MODE SWITCH
   if (setPricingEnabled !== undefined) {
     if (setPricingEnabled === true) {
+      // SWITCHING TO SET-BASED PRICING
       if (!sets || !Array.isArray(sets) || sets.length === 0) {
         return res.status(400).json(new ApiResponse(400, null, "Sets array is required when enabling set pricing"));
       }
 
+      // Validate sets
       for (const set of sets) {
         if (!set.quantity || !set.price || parseFloat(set.quantity) <= 0 || parseFloat(set.price) <= 0) {
           return res.status(400).json(new ApiResponse(400, null, "Each set must have valid quantity and price"));
@@ -367,6 +311,7 @@ export const updateVegetable = asyncHandler(async (req, res) => {
         })),
       };
 
+      // Update stock pieces
       if (stockPieces !== undefined) {
         if (isNaN(stockPieces) || parseFloat(stockPieces) < 0) {
           return res.status(400).json(new ApiResponse(400, null, "Valid stockPieces required"));
@@ -378,8 +323,10 @@ export const updateVegetable = asyncHandler(async (req, res) => {
         updateData.outOfStock = true;
       }
 
+      // Zero out weight-based fields
       updateData.stockKg = 0;
     } else {
+      // SWITCHING TO WEIGHT-BASED PRICING
       if (price1kg !== undefined && marketPrice1kg !== undefined && stockKg !== undefined) {
         if (parseFloat(price1kg) <= 0 || parseFloat(marketPrice1kg) <= 0 || parseFloat(stockKg) < 0) {
           return res.status(400).json(new ApiResponse(400, null, "Valid price and stock required for weight pricing"));
@@ -393,6 +340,7 @@ export const updateVegetable = asyncHandler(async (req, res) => {
         updateData.setPricing = { enabled: false, sets: [] };
         updateData.stockPieces = 0;
       } else {
+        // Use existing weight data if not provided
         updateData.setPricing = { enabled: false, sets: [] };
         updateData.stockPieces = 0;
         if (existingVeg.stockKg !== undefined) {
@@ -400,10 +348,13 @@ export const updateVegetable = asyncHandler(async (req, res) => {
         }
       }
     }
-  } else {
+  }
+  // UPDATE WITHIN CURRENT MODE (no mode switch)
+  else {
     const currentMode = existingVeg.setPricing?.enabled === true;
 
     if (currentMode) {
+      // UPDATING SET-BASED ITEM
       if (sets !== undefined) {
         if (!Array.isArray(sets) || sets.length === 0) {
           return res.status(400).json(new ApiResponse(400, null, "Sets array cannot be empty"));
@@ -435,6 +386,7 @@ export const updateVegetable = asyncHandler(async (req, res) => {
         updateData.outOfStock = parseFloat(stockPieces) === 0;
       }
     } else {
+      // UPDATING WEIGHT-BASED ITEM
       if (price1kg !== undefined) {
         if (parseFloat(price1kg) <= 0) {
           return res.status(400).json(new ApiResponse(400, null, "VegBazar price must be positive"));
@@ -460,12 +412,14 @@ export const updateVegetable = asyncHandler(async (req, res) => {
     }
   }
 
+  // UPDATE COMMON FIELDS
   if (image !== undefined) updateData.image = image;
   if (name !== undefined) updateData.name = name;
   if (offer !== undefined) updateData.offer = offer;
   if (description !== undefined) updateData.description = description;
   if (screenNumber !== undefined) updateData.screenNumber = screenNumber;
 
+  // Perform update
   const vegetable = await Vegetable.findByIdAndUpdate(
     id,
     { $set: updateData },
@@ -476,27 +430,28 @@ export const updateVegetable = asyncHandler(async (req, res) => {
     return res.status(404).json(new ApiResponse(404, null, "Vegetable not found"));
   }
 
-  cache.clear();
-
   res.json(new ApiResponse(200, vegetable, "Vegetable updated successfully"));
 });
 
 export const homepageApi = asyncHandler(async (req, res) => {
-  const cacheKey = 'homepage';
-  const cached = cache.get(cacheKey);
-  
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return res.json(new ApiResponse(200, cached.data, "Vegetables fetched from cache"));
+  // fetch only in-stock vegetables
+  const vegetables = await Vegetable.find({ outOfStock: false });
+
+  // convert docs to plain objects and attach pricing/set options
+  const vegetablesWithOptions = vegetables.map((veg) =>
+    formatVegetableWithOptions(veg)
+  );
+
+  // Fisher-Yates shuffle (in-place)
+  for (let i = vegetablesWithOptions.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [vegetablesWithOptions[i], vegetablesWithOptions[j]] = [
+      vegetablesWithOptions[j],
+      vegetablesWithOptions[i],
+    ];
   }
-  
-  const vegetables = await Vegetable.find({ outOfStock: false }).lean();
-  const vegetablesWithOptions = vegetables.map(veg => formatVegetableWithOptions(veg));
-  const shuffled = shuffleArray(vegetablesWithOptions);
-  
-  cache.set(cacheKey, {
-    data: shuffled,
-    timestamp: Date.now()
-  });
-  
-  res.json(new ApiResponse(200, shuffled, "Vegetables fetched successfully"));
+
+  res.json(
+    new ApiResponse(200, vegetablesWithOptions, "Vegetables fetched successfully")
+  );
 });
