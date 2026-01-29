@@ -10,9 +10,9 @@ const CONFIG = Object.freeze({
     accessType: "access",
   },
   rateLimit: {
-    maxAttempts: 5,
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    cleanupIntervalMs: 60 * 60 * 1000, // 1 hour
+    maxAttempts: 10,
+    windowMs: 60 * 1000, // 60 seconds
+    cleanupIntervalMs: 60 * 1000 , // 1 hour
   },
   cache: {
     userTTL: 5 * 60 * 1000, // 5 minutes
@@ -294,12 +294,20 @@ export const rateLimitLogin = (req, res, next) => {
     return next();
   }
 
+  // Check if IP is blocked
+  if (ipBlacklist.has(req.ip)) {
+    throw new ApiError(403, "Your IP address has been blocked due to multiple failed login attempts");
+  }
+
   const result = loginRateLimiter.isRateLimited(identifier);
 
   if (result.limited) {
+    // Block the IP after 10 failed attempts
+    blockIP(req.ip);
+    
     throw new ApiError(
       429,
-      `Too many login attempts. Please try again in ${result.waitMinutes} minute${result.waitMinutes > 1 ? 's' : ''}.`
+      `Too many login attempts. Your IP has been blocked for security. Please try again in ${result.waitMinutes} minute${result.waitMinutes > 1 ? 's' : ''}.`
     );
   }
 
@@ -464,18 +472,32 @@ export const verifyJWTWithBlacklist = asyncHandler(async (req, res, next) => {
 
 // ================= IP WHITELIST/BLACKLIST (Optional) =================
 const ipBlacklist = new Set();
-const ipWhitelist = new Set();
+const ipWhitelist = new Map(); // Store {ip: expiresAt}
+
+const IP_WHITELIST_TTL = 5 * 60 * 1000; // 5 minutes
 
 export const blockIP = (ip) => {
   ipBlacklist.add(ip);
 };
 
-export const allowIP = (ip) => {
-  ipWhitelist.add(ip);
+export const allowIP = (ip, ttl = IP_WHITELIST_TTL) => {
+  const expiresAt = Date.now() + ttl;
+  ipWhitelist.set(ip, expiresAt);
 };
 
 export const checkIPRestrictions = (req, res, next) => {
   const clientIP = req.ip || req.connection.remoteAddress;
+
+  // Check if whitelisted IP has expired
+  if (ipWhitelist.has(clientIP)) {
+    const expiresAt = ipWhitelist.get(clientIP);
+    if (Date.now() > expiresAt) {
+      ipWhitelist.delete(clientIP);
+    } else {
+      // IP is still whitelisted
+      return next();
+    }
+  }
 
   // If whitelist is active, only allow whitelisted IPs
   if (ipWhitelist.size > 0 && !ipWhitelist.has(clientIP)) {
@@ -489,3 +511,13 @@ export const checkIPRestrictions = (req, res, next) => {
 
   next();
 };
+
+// Cleanup expired whitelist entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, expiresAt] of ipWhitelist.entries()) {
+    if (now > expiresAt) {
+      ipWhitelist.delete(ip);
+    }
+  }
+}, IP_WHITELIST_TTL);
