@@ -3,7 +3,6 @@ import User from "../Model/user.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
 import { ApiError } from "../utility/ApiError.js";
-import { Query } from "mongoose";
 
 const ADDRESS_TYPES = new Set(["home", "work", "other"]);
 

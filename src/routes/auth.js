@@ -29,7 +29,7 @@ import {
   getAllUsers,
   updateUserStatus,
   deleteUser,
-} from "../Controller/auth.js";
+} from "../controller/auth.js";
 
 import { verifyJWT, isAdmin } from "../middleware/auth.js";
 
