@@ -470,11 +470,11 @@ export const forgotPassword = asyncHandler(async (req, res) => {
 
 // UPDATE THE EXISTING adminRegister FUNCTION:
 export const adminRegister = asyncHandler(async (req, res) => {
-  const { username, email, password, phone, adminSecretKey } = req.body;
+  const { username, email, password, phone,  } = req.body;
 
-  if (adminSecretKey !== process.env.ADMIN_SECRET_KEY) {
-    throw new ApiError(403, "Invalid admin registration key");
-  }
+  // if (adminSecretKey !== process.env.ADMIN_SECRET_KEY) {
+  //   throw new ApiError(403, "Invalid admin registration key");
+  // }
 
   if (!username || !email || !password) {
     throw new ApiError(400, "Username, email, and password are required");

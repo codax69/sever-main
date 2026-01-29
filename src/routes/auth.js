@@ -39,11 +39,11 @@ const router = express.Router();
 
 // Strict rate limiter for authentication attempts
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 requests per window
+  windowMs: 60 * 1000, // 15 minutes
+  max: 10, // 5 requests per window
   message: {
     statusCode: 429,
-    message: "Too many login attempts. Please try again after 15 minutes.",
+    message: "Too many login attempts. Please try again after 1 minutes.",
     success: false,
   },
   standardHeaders: true,
@@ -52,11 +52,12 @@ const authLimiter = rateLimit({
 
 // Rate limiter for password reset requests
 const passwordResetLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 60 * 1000, // 15 minutes
   max: 3, // 3 requests per window
   message: {
     statusCode: 429,
-    message: "Too many password reset attempts. Please try again after 15 minutes.",
+    message:
+      "Too many password reset attempts. Please try again after 1 minutes.",
     success: false,
   },
   standardHeaders: true,
@@ -65,11 +66,12 @@ const passwordResetLimiter = rateLimit({
 
 // Rate limiter for email verification resend
 const emailVerificationLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: 60  * 1000, // 1 hour
   max: 3, // 3 requests per hour
   message: {
     statusCode: 429,
-    message: "Too many verification email requests. Please try again after 1 hour.",
+    message:
+      "Too many verification email requests. Please try again after 1 minutes.",
     success: false,
   },
   standardHeaders: true,
@@ -78,11 +80,11 @@ const emailVerificationLimiter = rateLimit({
 
 // General registration limiter
 const registrationLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 3, // 3 registrations per hour from same IP
+  windowMs: 60 * 1000, // 1 hour
+  max: 5, // 5 registrations per hour from same IP
   message: {
     statusCode: 429,
-    message: "Too many accounts created. Please try again after 1 hour.",
+    message: "Too many accounts created. Please try again after 1 minutes.",
     success: false,
   },
   standardHeaders: true,
@@ -102,7 +104,11 @@ router.post("/admin/login", authLimiter, adminLogin);
 
 // Email Verification (Admin Only)
 router.get("/verify-email/:token", verifyEmail);
-router.post("/resend-verification", emailVerificationLimiter, resendVerificationEmail);
+router.post(
+  "/resend-verification",
+  emailVerificationLimiter,
+  resendVerificationEmail,
+);
 
 // Password Management (Public)
 router.post("/forgot-password", passwordResetLimiter, forgotPassword);
