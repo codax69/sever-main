@@ -18,7 +18,7 @@ import { DELIVERY_CHARGES } from "../../const.js";
 // ================= CONSTANTS & CONFIGS =================
 const CONFIG = Object.freeze({
   deliveryCharges: DELIVERY_CHARGES / 100,
-  freeDeliveryThreshold: 250,
+  freeDeliveryThreshold: 269,
   orderIdRetries: 5,
   validStatuses: new Set([
     "placed",

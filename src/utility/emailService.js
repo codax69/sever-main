@@ -19,7 +19,6 @@ const createEmailTransporter = () => {
 
 // Email templates
 const getEmailTemplate = (type, data) => {
-  console.log(type, data);
   const templates = {
     passwordReset: {
       subject: "Password Reset Request - VegBazar",
@@ -57,8 +56,6 @@ const getEmailTemplate = (type, data) => {
                           <a href="${data.resetUrl}" style="display: inline-block; background-color: #e24100; color: #ffffff; text-decoration: none; font-weight: 600; font-size: 15px; padding: 12px 32px; border-radius: 4px;">Reset Password</a>
                         </td>
                       </tr>
-                    </table>
-                    
                     </table>
                     
                     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 20px 0;">
@@ -203,64 +200,99 @@ VegBazar Team
       subject: "Welcome to VegBazar",
       html: `
       <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
-      </head>
-      <body style="font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; margin: 0; padding: 0; background-color: #f3f4f6;">
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body style="font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; margin: 0; padding: 0; background-color: #f3f4f6;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f3f4f6; padding: 40px 20px;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1); overflow: hidden;">
+          
+          <!-- Header -->
           <tr>
-            <td align="center">
-              <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1); overflow: hidden;">
-                <!-- Header -->
+            <td style="background-color: #0e540b; color: #ffffff; text-align: center; padding: 32px 24px;">
+              <h1 style="font-size: 24px; font-weight: 600; margin: 0; color: #ffffff;">
+                Welcome to VegBazar
+              </h1>
+            </td>
+          </tr>
+
+          <!-- Content -->
+          <tr>
+            <td style="padding: 32px;">
+              <p style="font-size: 15px; color: #374151; margin: 0 0 16px 0; line-height: 1.6;">
+                Hello ${data.username},
+              </p>
+
+              <p style="font-size: 15px; color: #374151; margin: 0 0 16px 0; line-height: 1.6;">
+                Welcome to VegBazar — where freshness is planned, not guessed. 
+                You pre-order today, and we deliver farm-fresh vegetables the very next morning.
+              </p>
+
+              <p style="font-size: 15px; color: #1f2937; font-weight: 600; margin: 0 0 12px 0;">
+                Why VegBazar is Different:
+              </p>
+
+              <ul style="margin: 0 0 24px 20px; padding: 0; color: #374151; font-size: 15px; line-height: 1.8;">
+                <li style="margin: 12px 0;">
+                  Pre-order vegetables today, freshly delivered the next morning
+                </li>
+                <li style="margin: 12px 0;">
+                  No stored stock — vegetables are sourced only after your order
+                </li>
+                <li style="margin: 12px 0;">
+                  Real-time order tracking from confirmation to delivery
+                </li>
+                <li style="margin: 12px 0;">
+                  Transparent pricing, reliable service, and daily freshness
+                </li>
+              </ul>
+
+              <p style="font-size: 15px; color: #374151; margin: 0 0 24px 0; line-height: 1.6;">
+                Order today, relax tonight — your fresh vegetables arrive tomorrow morning.
+              </p>
+
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 24px 0;">
                 <tr>
-                  <td style="background-color: #0e540b; color: #ffffff; text-align: center; padding: 32px 24px;">
-                    <h1 style="font-size: 24px; font-weight: 600; margin: 0; color: #ffffff;">Welcome to VegBazar</h1>
-                  </td>
-                </tr>
-                
-                <!-- Content -->
-                <tr>
-                  <td style="padding: 32px;">
-                    <p style="font-size: 15px; color: #374151; margin: 0 0 16px 0; line-height: 1.6;">Hello ${data.username},</p>
-                    <p style="font-size: 15px; color: #374151; margin: 0 0 16px 0; line-height: 1.6;">Welcome to VegBazar. We're pleased to have you as a customer.</p>
-                    
-                    <p style="font-size: 15px; color: #1f2937; font-weight: 600; margin: 0 0 12px 0;">Our Services:</p>
-                    <ul style="margin: 0 0 24px 20px; padding: 0; color: #374151; font-size: 15px; line-height: 1.8;">
-                      <li style="margin: 12px 0;">Farm-fresh vegetables delivered daily</li>
-                      <li style="margin: 12px 0;">Same-day delivery for orders before noon</li>
-                      <li style="margin: 12px 0;">Competitive pricing with member discounts</li>
-                      <li style="margin: 12px 0;">Real-time order tracking</li>
-                    </ul>
-                    
-                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 24px 0;">
-                      <tr>
-                        <td align="center">
-                          <a href="${data.shopUrl || "https://vegbazar.store/"}" style="display: inline-block; background-color: #ff6b35; color: #ffffff; text-decoration: none; font-weight: 600; font-size: 15px; padding: 12px 32px; border-radius: 4px;">Start Shopping</a>
-                        </td>
-                      </tr>
-                    </table>
-                    
-                    <p style="font-size: 15px; color: #374151; margin: 24px 0 0 0; line-height: 1.6;">If you have any questions, please contact us at <a href="mailto:info.vegbazar@gmail.com" style="color: #ff6b35; text-decoration: none;">info.vegbazar@gmail.com</a></p>
-                  </td>
-                </tr>
-                
-                <!-- Footer -->
-                <tr>
-                  <td style="background-color: #f9fafb; text-align: center; padding: 20px 24px;">
-                    <p style="color: #6b7280; font-size: 13px; margin: 0;">&copy; ${new Date().getFullYear()} VegBazar. All rights reserved.</p>
+                  <td align="center">
+                    <a href="${data.shopUrl || "https://vegbazar.store/"}"
+                       style="display: inline-block; background-color: #ff6b35; color: #ffffff; text-decoration: none; font-weight: 600; font-size: 15px; padding: 12px 32px; border-radius: 4px;">
+                      Start Shopping
+                    </a>
                   </td>
                 </tr>
               </table>
+
+              <p style="font-size: 15px; color: #374151; margin: 24px 0 0 0; line-height: 1.6;">
+                If you have any questions, please contact us at
+                <a href="mailto:info.vegbazar@gmail.com" style="color: #ff6b35; text-decoration: none;">
+                  info.vegbazar@gmail.com
+                </a>
+              </p>
             </td>
           </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color: #f9fafb; text-align: center; padding: 20px 24px;">
+              <p style="color: #6b7280; font-size: 13px; margin: 0;">
+                &copy; ${new Date().getFullYear()} VegBazar. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
         </table>
-      </body>
-      </html>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
     `,
       text: `VegBazar - Welcome
 
