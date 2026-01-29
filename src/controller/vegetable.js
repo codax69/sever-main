@@ -484,7 +484,7 @@ export const updateVegetable = asyncHandler(async (req, res) => {
 export const homepageApi = asyncHandler(async (req, res) => {
   const cacheKey = 'homepage';
   const cached = cache.get(cacheKey);
-  
+   console.log(hello)
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return res.json(new ApiResponse(200, cached.data, "Vegetables fetched from cache"));
   }
