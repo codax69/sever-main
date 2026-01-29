@@ -1,42 +1,126 @@
-import jwt from "jsonwebtoken";
+import { expressjwt } from "express-jwt";
+import jwksRsa from "jwks-rsa";
+import User from "../Model/user.js";
+import "dotenv/config";
 
-const adminMiddleware = (req, res, next) => {
+/* -------------------------------------------------
+   1. Verify Auth0 JWT (cryptographically correct)
+-------------------------------------------------- */
+export const checkAuth0Jwt = expressjwt({
+  secret: jwksRsa.expressJwtSecret({
+    cache: true,
+    rateLimit: true,
+    jwksRequestsPerMinute: 5,
+    jwksUri: `https://${process.env.AUTH0_DOMAIN}/.well-known/jwks.json`,
+  }),
+  audience: process.env.AUTH0_AUDIENCE,
+  issuer: `https://${process.env.AUTH0_DOMAIN}/`,
+  algorithms: ["RS256"],
+});
+
+/* -------------------------------------------------
+   2. Attach internal user from DB (business logic)
+-------------------------------------------------- */
+export const attachUser = async (req, res, next) => {
   try {
-    // Get token from cookies or Authorization header
-    const token =
-      req.cookies?.accessToken ||
-      req.header("Authorization")?.replace("Bearer ", "").trim();
-  // console.log(token)
-    if (!token) {
-      return res
-        .status(401)
-        .json({ message: "No token, authorization denied" });
+    const auth0Id = req.auth?.sub; // e.g. auth0|65fa...
+
+    if (!auth0Id) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid token payload",
+      });
     }
 
-    // Verify access token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findOne({ auth0Id }).select(
+      "-password -refreshToken"
+    );
 
-    // Role check (only admin allowed)
-    if (decoded.role !== "admin") {
-      return res
-        .status(403)
-        .json({ message: "Access denied. Admin rights required" });
+    if (!user) {
+      return res.status(403).json({
+        success: false,
+        message: "User not registered in system",
+      });
     }
 
-    // Attach user to request
-    req.user = decoded;
+    if (!user.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: "Account deactivated",
+      });
+    }
+
+    if (
+      ["delivery_partner", "packaging", "editor"].includes(user.role) &&
+      !user.isApproved
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Account pending approval",
+        needsApproval: true,
+      });
+    }
+
+    req.user = {
+      id: user._id,
+      auth0Id,
+      email: user.email,
+      role: user.role,
+      username: user.username,
+      isApproved: user.isApproved,
+      isActive: user.isActive,
+    };
+
     next();
-  } catch (error) {
-    if (error.name === "TokenExpiredError") {
-      return res
-        .status(401)
-        .json({ message: "Token expired, please login again" });
-    }
-    if (error.name === "JsonWebTokenError") {
-      return res.status(401).json({ message: "Invalid token" });
-    }
-    res.status(401).json({ message: "Authentication failed" });
+  } catch (err) {
+    console.error("Auth attach error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Authentication failed",
+    });
   }
 };
+
+/* -------------------------------------------------
+   3. Role authorization (this survives)
+-------------------------------------------------- */
+export const authorizeRoles = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+    }
+
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied",
+      });
+    }
+
+    next();
+  };
+};
+
+/* -------------------------------------------------
+   4. Optional Auth (non-blocking)
+-------------------------------------------------- */
+export const optionalAuth = (req, res, next) => {
+  checkAuth0Jwt(req, res, (err) => {
+    if (err) return next(); // ignore auth errors
+    attachUser(req, res, next);
+  });
+};
+
+/* -------------------------------------------------
+   Default export (admin protection)
+-------------------------------------------------- */
+const adminMiddleware = [
+  checkAuth0Jwt,
+  attachUser,
+  authorizeRoles("admin"),
+];
 
 export default adminMiddleware;

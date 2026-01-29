@@ -1,531 +1,480 @@
 import Order from "../Model/order.js";
-import Customer from "../Model/customer.js";
+import User from "../Model/user.js";
 import Vegetable from "../Model/vegetable.js";
 import Offer from "../Model/offer.js";
 import Coupon from "../Model/coupon.js";
+import Address from "../Model/address.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import { ApiError } from "../utility/ApiError.js";
 import { incrementCouponUsage } from "./coupon.js";
+import { processOrderInvoice, sendInvoiceEmail } from "./invoice.js";
 import Razorpay from "razorpay";
 import crypto from "crypto";
+import nodemailer from "nodemailer";
 import "dotenv/config";
 import { DELIVERY_CHARGES } from "../../const.js";
+
+// ================= CONSTANTS & CONFIGS =================
+const CONFIG = Object.freeze({
+  deliveryCharges: DELIVERY_CHARGES / 100,
+  freeDeliveryThreshold: 250,
+  orderIdRetries: 5,
+  validStatuses: new Set([
+    "placed",
+    "processed",
+    "shipped",
+    "delivered",
+    "cancelled",
+  ]),
+  weightToKg: new Map([
+    ["1kg", 1],
+    ["500g", 0.5],
+    ["250g", 0.25],
+    ["100g", 0.1],
+  ]),
+  weightPriceMap: new Map([
+    ["1kg", "weight1kg"],
+    ["500g", "weight500g"],
+    ["250g", "weight250g"],
+    ["100g", "weight100g"],
+  ]),
+});
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_SECRET,
 });
 
-// ============================================================================
-// CONSTANTS & CONFIGS (Memory efficient)
-// ============================================================================
+// ================= ADMIN EMAIL NOTIFICATION =================
+const sendAdminOrderNotification = async (order) => {
+  try {
+    const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_USER;
+    if (!adminEmail) {
+      console.warn("Admin email not configured");
+      return;
+    }
 
-const WEIGHT_TO_KG = Object.freeze({
-  "1kg": 1,
-  "500g": 0.5,
-  "250g": 0.25,
-  "100g": 0.1,
-});
+    const transporter = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
 
-const WEIGHT_PRICE_MAP = Object.freeze({
-  "1kg": "weight1kg",
-  "500g": "weight500g",
-  "250g": "weight250g",
-  "100g": "weight100g",
-});
+    const customerName = order.customerInfo?.name || "Unknown";
 
-const VALID_ORDER_STATUSES = Object.freeze([
-  "placed",
-  "processed",
-  "shipped",
-  "delivered",
-  "cancelled",
-]);
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto;">
+        <div style="background-color: #0e540b; color: white; padding: 15px; text-align: center;">
+          <h2 style="margin: 0;">New Order</h2>
+        </div>
+        <div style="padding: 15px; background-color: #f8f9fa; border: 1px solid #ddd;">
+          <p>Order #<strong>${order.orderId}</strong> placed</p>
+          <p>Customer: ${customerName}</p>
+          <p>Amount: ₹${(order.totalAmount || 0).toFixed(2)}</p>
+        </div>
+      </div>
+    `;
 
-const DELIVERY_CHARGES_RUPEES = DELIVERY_CHARGES / 100;
-const FREE_DELIVERY_THRESHOLD = 250;
+    const mailOptions = {
+      from: { name: "VegBazar Admin", address: process.env.EMAIL_USER },
+      to: adminEmail,
+      subject: `Order #${order.orderId} - ${(order.totalAmount || 0).toFixed(2)}`,
+      html,
+    };
 
-// ============================================================================
-// PRICING HELPER FUNCTIONS (Optimized)
-// ============================================================================
-
-function getPriceForSet(vegetable, setIndex) {
-  const sets = vegetable.setPricing?.sets;
-  if (!vegetable.setPricing?.enabled || !sets) {
-    throw new Error(
-      `Vegetable ${vegetable.name} does not have set pricing enabled`
+    await transporter.sendMail(mailOptions);
+    // console.log(`Admin notification sent for order ${order.orderId}`);
+  } catch (error) {
+    console.error(
+      `Failed to send admin notification for order ${order.orderId}:`,
+      error.message,
     );
   }
+};
 
-  const setOption = sets[setIndex];
-  if (!setOption) {
-    throw new Error(
-      `Invalid set index: ${setIndex}. Available sets: 0-${sets.length - 1}`
-    );
+// ================= LRU CACHE WITH DOUBLY LINKED LIST =================
+class LRUCache {
+  #capacity;
+  #cache = new Map();
+
+  constructor(capacity = 100) {
+    this.#capacity = capacity;
   }
 
-  return {
-    price: setOption.price,
-    quantity: setOption.quantity,
-    unit: setOption.unit,
-    label: `${setOption.quantity} ${setOption.unit}`,
-  };
+  get(key) {
+    if (!this.#cache.has(key)) return null;
+    const val = this.#cache.get(key);
+    this.#cache.delete(key);
+    this.#cache.set(key, val);
+    return val;
+  }
+
+  set(key, value) {
+    if (this.#cache.has(key)) {
+      this.#cache.delete(key);
+    } else if (this.#cache.size >= this.#capacity) {
+      this.#cache.delete(this.#cache.keys().next().value);
+    }
+    this.#cache.set(key, value);
+  }
+
+  has(key) {
+    return this.#cache.has(key);
+  }
 }
 
-function getPriceForWeight(vegetable, weight) {
-  const priceKey = WEIGHT_PRICE_MAP[weight];
-  const price = vegetable.prices?.[priceKey];
+const orderIdCache = new LRUCache(100);
 
-  if (!priceKey || !price) {
-    throw new Error(
-      `Invalid weight: ${weight}. Must be one of: 1kg, 500g, 250g, 100g`
-    );
+// ================= ORDER ID GENERATOR WITH EXPONENTIAL BACKOFF =================
+const generateUniqueOrderId = async (retries = CONFIG.orderIdRetries) => {
+  const dateStr = new Date().toISOString().slice(2, 10).replace(/-/g, "");
+  const cacheKey = `ORD${dateStr}`;
+
+  if (orderIdCache.has(cacheKey)) {
+    const newSeq = orderIdCache.get(cacheKey) + 1;
+    orderIdCache.set(cacheKey, newSeq);
+    return `${cacheKey}${String(newSeq).padStart(3, "0")}`;
   }
-  return price;
-}
 
-function getPrice(vegetable, weightOrSet, quantity = 1) {
-  const isSetBased =
-    vegetable.pricingType === "set" || vegetable.setPricing?.enabled;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const lastOrder = await Order.findOne(
+        { orderId: { $regex: `^${cacheKey}` } },
+        { orderId: 1 },
+      )
+        .sort({ orderId: -1 })
+        .lean();
 
-  if (isSetBased) {
-    const setIndex = weightOrSet.startsWith("set")
-      ? parseInt(weightOrSet.slice(3))
-      : parseInt(weightOrSet);
+      const sequence = lastOrder
+        ? parseInt(lastOrder.orderId.slice(-3)) + 1
+        : 1;
+      const orderId = `${cacheKey}${String(sequence).padStart(3, "0")}`;
 
-    const setInfo = getPriceForSet(vegetable, setIndex);
+      if (!(await Order.exists({ orderId }))) {
+        orderIdCache.set(cacheKey, sequence);
+        return orderId;
+      }
+    } catch (error) {
+      if (i === retries - 1) return `ORD${Date.now().toString().slice(-9)}`;
+      await new Promise((r) => setTimeout(r, 50 << i));
+    }
+  }
+  throw new Error("Failed to generate order ID");
+};
 
+// ================= PRICE CALCULATION STRATEGY PATTERN =================
+const priceStrategies = {
+  set: (veg, setIdx, qty) => {
+    const set = veg.setPricing?.sets?.[setIdx];
+    if (!set) throw new Error(`Invalid set index: ${setIdx}`);
     return {
       type: "set",
-      pricePerUnit: setInfo.price,
-      subtotal: setInfo.price * quantity,
-      label: setInfo.label,
-      setIndex,
-      setQuantity: setInfo.quantity,
-      setUnit: setInfo.unit,
+      pricePerUnit: set.price,
+      subtotal: set.price * qty,
+      label: `${set.quantity} ${set.unit}`,
+      setIndex: setIdx,
+      setQuantity: set.quantity,
+      setUnit: set.unit,
     };
-  }
+  },
+  weight: (veg, weight, qty) => {
+    const price = veg.prices?.[CONFIG.weightPriceMap.get(weight)];
+    if (!price) throw new Error(`Invalid weight: ${weight}`);
+    return {
+      type: "weight",
+      pricePerUnit: price,
+      subtotal: price * qty,
+      weight,
+    };
+  },
+};
 
-  const pricePerUnit = getPriceForWeight(vegetable, weightOrSet);
-  return {
-    type: "weight",
-    pricePerUnit,
-    subtotal: pricePerUnit * quantity,
-    weight: weightOrSet,
-  };
-}
+const getPrice = (veg, weightOrSet, qty = 1) => {
+  const isSet = veg.pricingType === "set" || veg.setPricing?.enabled;
+  const setIdx = weightOrSet.startsWith("set")
+    ? parseInt(weightOrSet.slice(3))
+    : parseInt(weightOrSet);
+  return isSet
+    ? priceStrategies.set(veg, setIdx, qty)
+    : priceStrategies.weight(veg, weightOrSet, qty);
+};
 
-// ============================================================================
-// STOCK CALCULATION FUNCTIONS (Optimized)
-// ============================================================================
+// ================= BULK STOCK UPDATE (SINGLE DB CALL) =================
+const updateStock = async (items, operation = "deduct") => {
+  const vegIds = [...new Set(items.map((i) => i.vegetable))];
+  const vegetables = await Vegetable.find({ _id: { $in: vegIds } }).lean();
+  const vegMap = new Map(vegetables.map((v) => [v._id.toString(), v]));
 
-function calculateKgFromWeight(weight, quantity) {
-  return (WEIGHT_TO_KG[weight] || 0) * quantity;
-}
+  const ops = [];
+  const updates = [];
 
-function calculatePiecesFromSet(vegetable, setIndex, quantity) {
-  const setOption = vegetable.setPricing.sets[setIndex];
-  if (!setOption) {
-    throw new Error(`Invalid set index: ${setIndex}`);
-  }
-  return setOption.quantity * quantity;
-}
+  for (const item of items) {
+    const veg = vegMap.get(item.vegetable.toString());
+    if (!veg) throw new Error(`Vegetable not found: ${item.vegetable}`);
 
-async function deductVegetableStock(selectedVegetables) {
-  const stockUpdates = [];
-  const bulkOps = [];
+    const isSet = veg.pricingType === "set" || veg.setPricing?.enabled;
+    const setIdx = item.setIndex ?? parseInt(item.weight?.slice(3) || "0");
 
-  // First pass: Validate all items
-  for (const item of selectedVegetables) {
-    const vegetable = await Vegetable.findById(item.vegetable).lean();
-    if (!vegetable) {
-      throw new Error(`Vegetable not found: ${item.vegetable}`);
-    }
-
-    const isSetBased =
-      vegetable.pricingType === "set" || vegetable.setPricing?.enabled;
-
-    if (isSetBased) {
-      const setIndex = item.setIndex ?? parseInt(item.weight?.slice(3) || "0");
-      const piecesToDeduct = calculatePiecesFromSet(
-        vegetable,
-        setIndex,
-        item.quantity
-      );
-
-      if (vegetable.stockPieces < piecesToDeduct) {
-        throw new Error(
-          `Insufficient stock for ${vegetable.name}. Available: ${vegetable.stockPieces} pieces, Required: ${piecesToDeduct} pieces`
-        );
+    if (isSet) {
+      const pieces = veg.setPricing.sets[setIdx].quantity * item.quantity;
+      const delta = operation === "deduct" ? -pieces : pieces;
+      if (operation === "deduct" && veg.stockPieces < pieces) {
+        throw new Error(`Insufficient stock for ${veg.name}`);
       }
-
-      stockUpdates.push({
+      ops.push({
+        updateOne: {
+          filter: { _id: item.vegetable },
+          update: {
+            $inc: { stockPieces: delta },
+            $set: { outOfStock: veg.stockPieces + delta <= 0 },
+          },
+        },
+      });
+      updates.push({
         vegetableId: item.vegetable,
-        vegetableName: vegetable.name,
-        deducted: piecesToDeduct,
-        previousStock: vegetable.stockPieces,
+        vegetableName: veg.name,
+        [operation === "deduct" ? "deducted" : "restored"]: pieces,
+        previousStock: veg.stockPieces,
         type: "pieces",
       });
-
-      bulkOps.push({
-        updateOne: {
-          filter: { _id: item.vegetable },
-          update: {
-            $inc: { stockPieces: -piecesToDeduct },
-            $set: { outOfStock: vegetable.stockPieces - piecesToDeduct <= 0 },
-          },
-        },
-      });
     } else {
-      const kgToDeduct = calculateKgFromWeight(item.weight, item.quantity);
-
-      if (vegetable.stockKg < kgToDeduct) {
-        throw new Error(
-          `Insufficient stock for ${vegetable.name}. Available: ${vegetable.stockKg}kg, Required: ${kgToDeduct}kg`
-        );
+      const kg = CONFIG.weightToKg.get(item.weight) * item.quantity;
+      const delta = operation === "deduct" ? -kg : kg;
+      if (operation === "deduct" && veg.stockKg < kg) {
+        throw new Error(`Insufficient stock for ${veg.name}`);
       }
-
-      stockUpdates.push({
-        vegetableId: item.vegetable,
-        vegetableName: vegetable.name,
-        deducted: kgToDeduct,
-        previousStock: vegetable.stockKg,
-        type: "kg",
-      });
-
-      bulkOps.push({
+      ops.push({
         updateOne: {
           filter: { _id: item.vegetable },
           update: {
-            $inc: { stockKg: -kgToDeduct },
-            $set: { outOfStock: vegetable.stockKg - kgToDeduct < 0.25 },
+            $inc: { stockKg: delta },
+            $set: { outOfStock: veg.stockKg + delta < 0.25 },
           },
         },
+      });
+      updates.push({
+        vegetableId: item.vegetable,
+        vegetableName: veg.name,
+        [operation === "deduct" ? "deducted" : "restored"]: kg,
+        previousStock: veg.stockKg,
+        type: "kg",
       });
     }
   }
 
-  // Bulk update all stocks at once (much faster)
-  if (bulkOps.length > 0) {
-    await Vegetable.bulkWrite(bulkOps);
+  if (ops.length) await Vegetable.bulkWrite(ops);
+  return updates;
+};
+
+// ================= CUSTOMER PROCESSING WITH UPSERT =================
+const processCustomer = async (info) => {
+  if (typeof info === "string") {
+    if (!(await User.exists({ _id: info }))) throw new Error("User not found");
+    return info;
   }
+  if (info._id) return info._id;
 
-  return stockUpdates;
-}
-
-async function restoreVegetableStock(selectedVegetables) {
-  const stockUpdates = [];
-  const bulkOps = [];
-
-  for (const item of selectedVegetables) {
-    const vegetable = await Vegetable.findById(item.vegetable).lean();
-    if (!vegetable) continue;
-
-    const isSetBased =
-      vegetable.pricingType === "set" || vegetable.setPricing?.enabled;
-
-    if (isSetBased) {
-      const setIndex = item.setIndex ?? parseInt(item.weight?.slice(3) || "0");
-      const piecesToRestore = calculatePiecesFromSet(
-        vegetable,
-        setIndex,
-        item.quantity
-      );
-
-      stockUpdates.push({
-        vegetableId: item.vegetable,
-        vegetableName: vegetable.name,
-        restored: piecesToRestore,
-        newStock: vegetable.stockPieces + piecesToRestore,
-        type: "pieces",
-      });
-
-      bulkOps.push({
-        updateOne: {
-          filter: { _id: item.vegetable },
-          update: {
-            $inc: { stockPieces: piecesToRestore },
-            $set: { outOfStock: false },
-          },
-        },
-      });
-    } else {
-      const kgToRestore = calculateKgFromWeight(item.weight, item.quantity);
-
-      stockUpdates.push({
-        vegetableId: item.vegetable,
-        vegetableName: vegetable.name,
-        restored: kgToRestore,
-        newStock: vegetable.stockKg + kgToRestore,
-        type: "kg",
-      });
-
-      bulkOps.push({
-        updateOne: {
-          filter: { _id: item.vegetable },
-          update: {
-            $inc: { stockKg: kgToRestore },
-            $set: {
-              outOfStock:
-                vegetable.stockKg + kgToRestore >= 0.25 ? false : true,
-            },
-          },
-        },
-      });
-    }
-  }
-
-  // Bulk update all stocks at once
-  if (bulkOps.length > 0) {
-    await Vegetable.bulkWrite(bulkOps);
-  }
-
-  return stockUpdates;
-}
-
-// ============================================================================
-// ORDER PROCESSING HELPER FUNCTIONS (Optimized)
-// ============================================================================
-
-async function processCustomer(customerInfo) {
-  if (typeof customerInfo === "string") {
-    const exists = await Customer.exists({ _id: customerInfo });
-    if (!exists) throw new Error("Customer not found");
-    return customerInfo;
-  }
-
-  if (customerInfo._id) return customerInfo._id;
-
-  if (!customerInfo.mobile || !customerInfo.name) {
-    throw new Error("Customer name and mobile are required");
-  }
-
-  const updateData = {
-    name: customerInfo.name,
-    mobile: customerInfo.mobile,
-    ...(customerInfo.city && { city: customerInfo.city }),
-    ...(customerInfo.area && { area: customerInfo.area }),
-    ...(customerInfo.email && { email: customerInfo.email }),
-    ...(customerInfo.address && { address: customerInfo.address }),
-  };
+  const phone = info.phone || info.mobile;
+  if (!phone) throw new Error("Phone required");
 
   try {
-    const customer = await Customer.findOneAndUpdate(
-      { mobile: customerInfo.mobile },
-      { $set: updateData },
-      { new: true, upsert: true, runValidators: true }
-    );
-    return customer._id;
-  } catch (error) {
-    if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern)[0];
-      const query =
-        field === "email" && customerInfo.email
-          ? { email: customerInfo.email }
-          : { mobile: customerInfo.mobile };
+    let user = await User.findOne({ phone });
 
-      const customer = await Customer.findOneAndUpdate(
-        query,
-        { $set: updateData },
-        { new: true, runValidators: true }
-      );
-      return customer._id;
-    }
-    throw error;
-  }
-}
-
-async function processOffer(selectedOffer) {
-  if (!selectedOffer) return null;
-
-  let query = {};
-
-  if (typeof selectedOffer === "string") {
-    if (!/^[0-9a-fA-F]{24}$/.test(selectedOffer)) {
-      throw new Error("Invalid offer ID format");
-    }
-    query = { _id: selectedOffer };
-  } else if (selectedOffer._id) {
-    query = { _id: selectedOffer._id };
-  } else if (selectedOffer.name) {
-    query = { name: selectedOffer.name };
-  } else {
-    throw new Error("Invalid offer data");
-  }
-
-  const offer = await Offer.findOne(query).select("_id").lean();
-  if (!offer) throw new Error("Offer not found");
-
-  return offer._id;
-}
-
-function getVegetableIdentifier(item) {
-  if (typeof item === "string") return item;
-  if (item.vegetable) {
-    return typeof item.vegetable === "string"
-      ? item.vegetable
-      : item.vegetable._id || item.vegetable.id;
-  }
-  return item._id || item.id || item.name;
-}
-
-async function processVegetables(selectedVegetables, isFromBasket = false) {
-  if (!Array.isArray(selectedVegetables) || selectedVegetables.length === 0) {
-    throw new Error("selectedVegetables must be a non-empty array");
-  }
-
-  const uniqueVegIds = [
-    ...new Set(selectedVegetables.map(getVegetableIdentifier).filter(Boolean)),
-  ];
-
-  if (uniqueVegIds.length === 0) {
-    throw new Error("No valid vegetable identifiers found");
-  }
-
-  const isObjectId = /^[0-9a-fA-F]{24}$/.test(uniqueVegIds[0]);
-
-  // Use lean() for better performance
-  const vegetables = await Vegetable.find(
-    isObjectId
-      ? { _id: { $in: uniqueVegIds } }
-      : {
-          $or: [
-            { name: { $in: uniqueVegIds } },
-            { _id: { $in: uniqueVegIds } },
-          ],
-        }
-  ).lean();
-
-  if (vegetables.length !== uniqueVegIds.length) {
-    const foundIds = vegetables.map((v) => v._id.toString());
-    const missingIds = uniqueVegIds.filter(
-      (id) => !foundIds.includes(id) && !vegetables.find((v) => v.name === id)
-    );
-    throw new Error(
-      `Some vegetables not found. Expected ${uniqueVegIds.length}, found ${vegetables.length}. Missing IDs: ${missingIds.join(", ")}`
-    );
-  }
-
-  // Use object instead of Map for better performance with small datasets
-  const vegMap = {};
-  vegetables.forEach((veg) => {
-    vegMap[veg._id.toString()] = veg;
-    vegMap[veg.name] = veg;
-  });
-
-  const groupedItems = {};
-
-  selectedVegetables.forEach((item) => {
-    const identifier = getVegetableIdentifier(item);
-    const vegetable = vegMap[identifier];
-
-    if (!vegetable) {
-      throw new Error(`Vegetable not found: ${identifier}`);
-    }
-
-    const weightOrSet = (typeof item === "object" && item?.weight) || "1kg";
-    const quantity = (typeof item === "object" && item?.quantity) || 1;
-    const groupKey = `${vegetable._id}_${weightOrSet}`;
-
-    if (groupedItems[groupKey]) {
-      const existing = groupedItems[groupKey];
-      existing.quantity += quantity;
-      existing.subtotal = existing.pricePerUnit * existing.quantity;
+    if (!user) {
+      user = await User.create({
+        ...(info.name && { username: info.name }),
+        ...(info.email && { email: info.email }),
+        phone,
+        isApproved: true,
+        role: "user",
+      });
     } else {
-      const priceInfo = getPrice(vegetable, weightOrSet, quantity);
+      Object.assign(user, {
+        ...(info.name && { username: info.name }),
+        ...(info.email && { email: info.email }),
+      });
+      await user.save();
+    }
 
-      const itemData = {
-        vegetable: vegetable._id,
-        quantity,
-        pricePerUnit: priceInfo.pricePerUnit,
-        subtotal: priceInfo.subtotal,
-        isFromBasket,
+    if (info.address || info.city || info.area) {
+      const existingAddresses = await Address.find({ user: user._id });
+      const addressData = {
+        street: info.address || "N/A",
+        area: info.area || "N/A",
+        city: info.city || "N/A",
+        state: info.state || "Gujarat",
+        pincode: info.zipCode || info.pincode || "000000",
+        country: "India",
+        type: info.addressType || "home",
+        isDefault: existingAddresses.length === 0,
       };
 
-      if (priceInfo.type === "set") {
-        itemData.weight = weightOrSet;
-        itemData.setIndex = priceInfo.setIndex;
-        itemData.setLabel = priceInfo.label;
-        itemData.setQuantity = priceInfo.setQuantity;
-        itemData.setUnit = priceInfo.setUnit;
-      } else {
-        itemData.weight = priceInfo.weight;
-      }
+      const similarAddress = existingAddresses.find(
+        (addr) =>
+          addr.street === addressData.street &&
+          addr.city === addressData.city &&
+          addr.area === addressData.area,
+      );
 
-      groupedItems[groupKey] = itemData;
+      if (!similarAddress) {
+        await user.addAddress(addressData);
+      } else if (existingAddresses.length === 1) {
+        await user.setDefaultAddress(similarAddress._id);
+      }
     }
+
+    return user._id;
+  } catch (err) {
+    if (err.code === 11000 && info.email) {
+      const user = await User.findOne({ email: info.email });
+      if (user) return user._id;
+    }
+    throw err;
+  }
+};
+
+// ================= VEGETABLE PROCESSING WITH GROUPING =================
+const getVegId = (item) =>
+  typeof item === "string"
+    ? item
+    : item.vegetable
+      ? typeof item.vegetable === "string"
+        ? item.vegetable
+        : item.vegetable._id || item.vegetable.id
+      : item._id || item.id || item.name;
+
+const processVegetables = async (items, isBasket = false) => {
+  if (!Array.isArray(items) || !items.length) throw new Error("Items required");
+
+  const vegIds = [...new Set(items.map(getVegId).filter(Boolean))];
+  if (!vegIds.length) throw new Error("No valid items");
+
+  const isObjectId = /^[0-9a-fA-F]{24}$/.test(vegIds[0]);
+  const vegetables = await Vegetable.find(
+    isObjectId
+      ? { _id: { $in: vegIds } }
+      : { $or: [{ name: { $in: vegIds } }, { _id: { $in: vegIds } }] },
+  ).lean();
+
+  if (vegetables.length !== vegIds.length) {
+    throw new Error(`Missing vegetables: ${vegIds.length - vegetables.length}`);
+  }
+
+  const vegMap = new Map();
+  vegetables.forEach((v) => {
+    vegMap.set(v._id.toString(), v);
+    vegMap.set(v.name, v);
   });
 
-  return Object.values(groupedItems);
-}
+  const grouped = new Map();
+  items.forEach((item) => {
+    const veg =
+      vegMap.get(getVegId(item).toString()) || vegMap.get(getVegId(item));
+    if (!veg) throw new Error(`Vegetable not found: ${getVegId(item)}`);
 
-async function processOrderData(
-  customerInfo,
-  selectedOffer,
-  selectedVegetables,
-  orderType = "custom"
-) {
+    const weight = item.weight || "1kg";
+    const qty = item.quantity || 1;
+    const key = `${veg._id}_${weight}`;
+
+    if (grouped.has(key)) {
+      const existing = grouped.get(key);
+      existing.quantity += qty;
+      existing.subtotal = existing.pricePerUnit * existing.quantity;
+    } else {
+      const priceInfo = getPrice(veg, weight, qty);
+      grouped.set(key, {
+        vegetable: veg._id,
+        quantity: qty,
+        pricePerUnit: priceInfo.pricePerUnit,
+        subtotal: priceInfo.subtotal,
+        isFromBasket: isBasket,
+        ...(priceInfo.type === "set"
+          ? {
+              weight,
+              setIndex: priceInfo.setIndex,
+              setLabel: priceInfo.label,
+              setQuantity: priceInfo.setQuantity,
+              setUnit: priceInfo.setUnit,
+            }
+          : { weight: priceInfo.weight }),
+      });
+    }
+  });
+  return Array.from(grouped.values());
+};
+
+// ================= PARALLEL ORDER DATA PROCESSING =================
+const processOrderData = async (
+  customer,
+  offer,
+  vegetables,
+  type = "custom",
+) => {
   try {
-    const isBasketOrder = orderType === "basket";
-
-    // Process in parallel for better performance
-    const [customerId, offerId, processedVegetables] = await Promise.all([
-      processCustomer(customerInfo),
-      isBasketOrder ? processOffer(selectedOffer) : Promise.resolve(null),
-      processVegetables(selectedVegetables, isBasketOrder),
+    const [customerId, offerId, processedVegs] = await Promise.all([
+      processCustomer(customer),
+      type === "basket" && offer
+        ? Offer.findById(typeof offer === "string" ? offer : offer._id, {
+            _id: 1,
+          })
+            .lean()
+            .then((o) => {
+              if (!o) throw new Error("Offer not found");
+              return o._id;
+            })
+        : null,
+      processVegetables(vegetables, type === "basket"),
     ]);
-
-    return { customerId, offerId, processedVegetables };
+    return { customerId, offerId, processedVegetables: processedVegs };
   } catch (error) {
     return { error: error.message };
   }
-}
+};
 
-function calculateOrderTotal(
-  processedVegetables,
+// ================= ORDER TOTAL CALCULATION =================
+const calculateOrderTotal = (
+  vegs,
   offerPrice = null,
-  orderType = "custom",
-  couponDiscount = 0
-) {
-  const vegetablesTotal = processedVegetables.reduce(
-    (sum, item) => sum + item.subtotal,
-    0
-  );
+  type = "custom",
+  discount = 0,
+) => {
+  const vegTotal = vegs.reduce((sum, i) => sum + i.subtotal, 0);
 
-  if (orderType === "basket") {
-    if (!offerPrice)
-      throw new Error("Offer price is required for basket orders");
-
-    const subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
+  if (type === "basket") {
+    if (!offerPrice) throw new Error("Offer price required");
+    const afterDiscount = Math.max(0, offerPrice - discount);
     return {
-      vegetablesTotal,
+      vegetablesTotal: vegTotal,
       offerPrice,
-      couponDiscount,
-      subtotalAfterDiscount,
-      deliveryCharges: DELIVERY_CHARGES_RUPEES,
-      totalAmount: subtotalAfterDiscount + DELIVERY_CHARGES_RUPEES,
+      couponDiscount: discount,
+      subtotalAfterDiscount: afterDiscount,
+      deliveryCharges: CONFIG.deliveryCharges,
+      totalAmount: afterDiscount + CONFIG.deliveryCharges,
     };
   }
 
-  const subtotalAfterDiscount = Math.max(0, vegetablesTotal - couponDiscount);
-  const appliedDeliveryCharges =
-    subtotalAfterDiscount > FREE_DELIVERY_THRESHOLD
-      ? 0
-      : DELIVERY_CHARGES_RUPEES;
+  const afterDiscount = Math.max(0, vegTotal - discount);
+  const delivery =
+    afterDiscount > CONFIG.freeDeliveryThreshold ? 0 : CONFIG.deliveryCharges;
 
   return {
-    vegetablesTotal,
+    vegetablesTotal: vegTotal,
     offerPrice: 0,
-    couponDiscount,
-    subtotalAfterDiscount,
-    deliveryCharges: appliedDeliveryCharges,
-    totalAmount: subtotalAfterDiscount + appliedDeliveryCharges,
+    couponDiscount: discount,
+    subtotalAfterDiscount: afterDiscount,
+    deliveryCharges: delivery,
+    totalAmount: afterDiscount + delivery,
   };
-}
+};
 
-async function validateAndApplyCoupon(couponCode, subtotal, customerId = null) {
-  if (!couponCode) {
+// ================= COUPON VALIDATION =================
+const validateCoupon = async (code, subtotal, userId = null) => {
+  if (!code) {
     return {
       couponId: null,
       couponDiscount: 0,
@@ -535,85 +484,83 @@ async function validateAndApplyCoupon(couponCode, subtotal, customerId = null) {
   }
 
   const coupon = await Coupon.findOne({
-    code: couponCode.toUpperCase(),
+    code: code.toUpperCase(),
     isActive: true,
   }).lean();
-
-  if (!coupon) throw new Error("Invalid coupon code");
-
-  // Check expiry
-  if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
-    throw new Error("Coupon has expired");
-  }
-
-  // Check minimum order amount
+  if (!coupon) throw new Error("Invalid coupon");
+  if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date())
+    throw new Error("Coupon expired");
   if (coupon.minOrderAmount && subtotal < coupon.minOrderAmount) {
-    throw new Error(
-      `Minimum order amount of ₹${coupon.minOrderAmount} required for this coupon`
-    );
+    throw new Error(`Minimum ₹${coupon.minOrderAmount} required`);
   }
-
-  // Check usage limits
-  if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
-    throw new Error("Coupon usage limit reached");
-  }
-
-  // Check per-user limit
-  if (customerId && coupon.perUserLimit) {
-    const userUsageCount =
-      coupon.usedBy?.filter((id) => id.toString() === customerId.toString())
+  if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit)
+    throw new Error("Coupon limit reached");
+  if (userId && coupon.perUserLimit) {
+    const userUsage =
+      coupon.usedBy?.filter((id) => id.toString() === userId.toString())
         .length || 0;
-    if (userUsageCount >= coupon.perUserLimit) {
-      throw new Error("You have reached the usage limit for this coupon");
-    }
+    if (userUsage >= coupon.perUserLimit) throw new Error("User limit reached");
   }
 
-  // Calculate discount inline instead of method call
-  const couponDiscount =
+  const discount =
     coupon.discountType === "percentage"
       ? Math.min(
           (subtotal * coupon.discountValue) / 100,
-          coupon.maxDiscount || Infinity
+          coupon.maxDiscount || Infinity,
         )
       : Math.min(coupon.discountValue, subtotal);
 
   return {
     couponId: coupon._id,
-    couponDiscount,
+    couponDiscount: discount,
     validatedCouponCode: coupon.code,
     couponDetails: {
       code: coupon.code,
       discountType: coupon.discountType,
       discountValue: coupon.discountValue,
       applied: true,
-      discount: couponDiscount,
+      discount,
     },
   };
-}
+};
 
-// ============================================================================
-// EXPORTED CONTROLLER FUNCTIONS
-// ============================================================================
+// ================= ORDER CREATION WITH RETRY =================
+const createOrderWithRetry = async (
+  data,
+  maxRetries = CONFIG.orderIdRetries,
+) => {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const orderId = await generateUniqueOrderId();
+      const order = await Order.create({ ...data, orderId });
+      return { order, orderId };
+    } catch (err) {
+      if (err.code === 11000 && i < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 50 << i));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("Failed to create order");
+};
 
+// ================= CONTROLLERS =================
 export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-
-  const endOfDay = new Date();
-  endOfDay.setHours(23, 59, 59, 999);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
 
   const count = await Order.countDocuments({
-    createdAt: { $gte: startOfDay, $lte: endOfDay },
+    createdAt: { $gte: today, $lt: tomorrow },
   });
-
-  res.json(
-    new ApiResponse(200, { count }, "Today's order count fetched successfully")
-  );
+  res.json(new ApiResponse(200, { count }, "Today's order count fetched"));
 });
 
 export const getOrders = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page);
-  const limit = parseInt(req.query.limit);
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
   const skip = (page - 1) * limit;
 
   const filter = {};
@@ -621,11 +568,11 @@ export const getOrders = asyncHandler(async (req, res) => {
   if (req.query.paymentMethod) filter.paymentMethod = req.query.paymentMethod;
   if (req.query.orderType) filter.orderType = req.query.orderType;
 
-  // Execute count and find in parallel
-  const [totalOrders, orders] = await Promise.all([
+  const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
     Order.find(filter)
       .populate("customerInfo")
+      .populate("deliveryAddressId")
       .populate("selectedOffer")
       .populate("selectedVegetables.vegetable")
       .sort({ createdAt: -1 })
@@ -641,76 +588,32 @@ export const getOrders = asyncHandler(async (req, res) => {
         orders,
         pagination: {
           currentPage: page,
-          totalPages: Math.ceil(totalOrders / limit),
-          totalOrders,
-          hasMore: page * limit < totalOrders,
+          totalPages: Math.ceil(total / limit),
+          totalOrders: total,
+          hasMore: page * limit < total,
         },
       },
-      "Orders fetched successfully"
-    )
+      "Orders fetched",
+    ),
   );
 });
 
 export const getOrderById = asyncHandler(async (req, res) => {
   const { orderId } = req.params;
-
   if (!/^ORD\d{11}$/.test(orderId)) {
     return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
   }
 
   const order = await Order.findOne({ orderId })
     .populate("customerInfo")
+    .populate({ path: "deliveryAddress", populate: { path: "user" } })
     .populate("selectedOffer")
     .populate("selectedVegetables.vegetable")
     .lean();
 
-  if (!order) {
+  if (!order)
     return res.status(404).json(new ApiResponse(404, null, "Order not found"));
-  }
-
-  res.json(new ApiResponse(200, order, "Order fetched successfully"));
-});
-
-export const updateOrderStatus = asyncHandler(async (req, res) => {
-  const { _id } = req.params;
-  const { orderStatus } = req.body;
-
-  if (!orderStatus || !VALID_ORDER_STATUSES.includes(orderStatus)) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(
-          400,
-          null,
-          `Invalid order status. Must be one of: ${VALID_ORDER_STATUSES.join(", ")}`
-        )
-      );
-  }
-
-  const currentOrder = await Order.findById(_id).lean();
-  if (!currentOrder) {
-    return res.status(404).json(new ApiResponse(404, null, "Order not found"));
-  }
-
-  // Restore stock if cancelling
-  if (orderStatus === "cancelled" && currentOrder.orderStatus !== "cancelled") {
-    try {
-      await restoreVegetableStock(currentOrder.selectedVegetables);
-    } catch (error) {
-      console.error("Error restoring stock:", error.message);
-    }
-  }
-
-  const order = await Order.findByIdAndUpdate(
-    _id,
-    { orderStatus },
-    { new: true, runValidators: true }
-  )
-    .populate("customerInfo")
-    .populate("selectedOffer")
-    .populate("selectedVegetables.vegetable");
-
-  res.json(new ApiResponse(200, order, "Order status updated successfully"));
+  res.json(new ApiResponse(200, order, "Order fetched"));
 });
 
 export const addOrder = asyncHandler(async (req, res) => {
@@ -718,210 +621,150 @@ export const addOrder = asyncHandler(async (req, res) => {
     customerInfo,
     selectedOffer,
     selectedVegetables,
-    orderId,
     paymentMethod,
     orderType,
     couponCode,
+    deliveryAddressId,
   } = req.body;
 
   // Validation
-  if (!customerInfo) {
+  if (!customerInfo)
     return res
       .status(400)
-      .json(new ApiResponse(400, null, "Customer information is required"));
-  }
-
-  if (!["basket", "custom"].includes(orderType)) {
+      .json(new ApiResponse(400, null, "Customer info required"));
+  if (!["basket", "custom"].includes(orderType))
     return res
       .status(400)
-      .json(
-        new ApiResponse(
-          400,
-          null,
-          "Invalid order type. Must be 'basket' or 'custom'"
-        )
-      );
+      .json(new ApiResponse(400, null, "Invalid order type"));
+  if (orderType === "basket" && !selectedOffer)
+    return res.status(400).json(new ApiResponse(400, null, "Offer required"));
+  if (!Array.isArray(selectedVegetables) || !selectedVegetables.length) {
+    return res.status(400).json(new ApiResponse(400, null, "Items required"));
   }
-
-  if (orderType === "basket" && !selectedOffer) {
+  if (!["COD", "ONLINE"].includes(paymentMethod))
     return res
       .status(400)
-      .json(
-        new ApiResponse(
-          400,
-          null,
-          "Offer selection is required for basket orders"
-        )
-      );
-  }
+      .json(new ApiResponse(400, null, "Invalid payment method"));
 
-  if (!Array.isArray(selectedVegetables) || selectedVegetables.length === 0) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "At least one vegetable must be selected")
-      );
-  }
-
-  if (!orderId) {
-    return res
-      .status(400)
-      .json(new ApiResponse(400, null, "Order ID is required"));
-  }
-
-  if (!["COD", "ONLINE"].includes(paymentMethod)) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(
-          400,
-          null,
-          "Valid payment method (COD or ONLINE) is required"
-        )
-      );
-  }
-
-  // Process order data
   const processed = await processOrderData(
     customerInfo,
     selectedOffer,
     selectedVegetables,
-    orderType
+    orderType,
   );
-
-  if (processed.error) {
+  if (processed.error)
     return res.status(400).json(new ApiResponse(400, null, processed.error));
-  }
 
   const { customerId, offerId, processedVegetables } = processed;
 
-  // Calculate subtotal for coupon
-  let subtotalForCoupon;
-  if (orderType === "basket") {
-    const offer = await Offer.findById(offerId).select("price").lean();
-    if (!offer) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Offer not found"));
-    }
-    subtotalForCoupon = offer.price;
-  } else {
-    subtotalForCoupon = processedVegetables.reduce(
-      (sum, item) => sum + item.subtotal,
-      0
-    );
-  }
+  let subtotal =
+    orderType === "basket"
+      ? (await Offer.findById(offerId, { price: 1 }).lean()).price
+      : processedVegetables.reduce((sum, i) => sum + i.subtotal, 0);
 
-  // Validate coupon
-  let couponId = null;
-  let couponDiscount = 0;
-  let validatedCouponCode = null;
-
+  let couponId = null,
+    couponDiscount = 0,
+    validatedCode = null;
   if (couponCode) {
     try {
-      const couponValidation = await validateAndApplyCoupon(
-        couponCode,
-        subtotalForCoupon,
-        customerId
-      );
-      couponId = couponValidation.couponId;
-      couponDiscount = couponValidation.couponDiscount;
-      validatedCouponCode = couponValidation.validatedCouponCode;
-    } catch (error) {
-      return res.status(400).json(new ApiResponse(400, null, error.message));
+      const v = await validateCoupon(couponCode, subtotal, customerId);
+      couponId = v.couponId;
+      couponDiscount = v.couponDiscount;
+      validatedCode = v.validatedCouponCode;
+    } catch (err) {
+      return res.status(400).json(new ApiResponse(400, null, err.message));
     }
   }
 
-  // Calculate totals
-  let totals;
-  if (orderType === "basket") {
-    const offer = await Offer.findById(offerId).select("price").lean();
-    const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
-    totals = {
-      vegetablesTotal: 0,
-      offerPrice: offer.price,
-      couponDiscount,
-      subtotalAfterDiscount,
-      deliveryCharges: DELIVERY_CHARGES_RUPEES,
-      totalAmount: subtotalAfterDiscount + DELIVERY_CHARGES_RUPEES,
-    };
-  } else {
-    totals = calculateOrderTotal(
-      processedVegetables,
-      null,
-      orderType,
-      couponDiscount
-    );
-  }
+  const totals = calculateOrderTotal(
+    processedVegetables,
+    orderType === "basket"
+      ? (await Offer.findById(offerId, { price: 1 }).lean()).price
+      : null,
+    orderType,
+    couponDiscount,
+  );
 
-  // COD payment
   if (paymentMethod === "COD") {
     let stockUpdates;
     try {
-      stockUpdates = await deductVegetableStock(processedVegetables);
-    } catch (error) {
-      return res.status(400).json(new ApiResponse(400, null, error.message));
+      stockUpdates = await updateStock(processedVegetables, "deduct");
+    } catch (err) {
+      return res.status(400).json(new ApiResponse(400, null, err.message));
     }
 
-    const orderData = {
-      orderType,
-      customerInfo: customerId,
-      selectedVegetables: processedVegetables,
-      orderDate: new Date(),
-      couponCode: validatedCouponCode,
-      couponId,
-      ...totals,
-      orderId,
-      paymentMethod: "COD",
-      paymentStatus: "pending",
-      orderStatus: "placed",
-      stockUpdates,
-      ...(orderType === "basket" && { selectedOffer: offerId }),
-    };
-
-    const order = await Order.create(orderData);
-
-    if (couponId) {
-      await incrementCouponUsage(couponId, customerId);
+    let result;
+    try {
+      result = await createOrderWithRetry({
+        orderType,
+        customerInfo: customerId,
+        selectedVegetables: processedVegetables,
+        orderDate: new Date(),
+        couponCode: validatedCode,
+        couponId,
+        ...totals,
+        paymentMethod: "COD",
+        paymentStatus: "pending",
+        orderStatus: "placed",
+        stockUpdates,
+        deliveryAddressId,
+        ...(orderType === "basket" && { selectedOffer: offerId }),
+      });
+    } catch (err) {
+      await updateStock(processedVegetables, "restore");
+      return res.status(500).json(new ApiResponse(500, null, err.message));
     }
 
-    const populatedOrder = await Order.findById(order._id)
-      .populate("customerInfo")
+    if (couponId) await incrementCouponUsage(couponId, customerId);
+    await User.findByIdAndUpdate(customerId, {
+      $push: { orders: result.order._id },
+    });
+
+    const populated = await Order.findById(result.order._id)
+      .populate("customerInfo", "name email phone")
+      .populate("deliveryAddressId")
       .populate("selectedOffer")
-      .populate("selectedVegetables.vegetable");
+      .populate("selectedVegetables.vegetable", "name")
+      .lean();
 
-    return res.json(
-      new ApiResponse(201, populatedOrder, "Order placed successfully with COD")
-    );
+    processOrderInvoice(populated._id, {
+      sendEmail: true,
+      emailType: "invoice",
+    }).catch(console.error);
+    
+    // Send admin notification
+    sendAdminOrderNotification(populated).catch(console.error);
+    
+    return res.json(new ApiResponse(201, populated, "Order placed with COD"));
   }
 
-  // Online payment
-  const amountInPaisa = Math.round(totals.totalAmount * 100);
-
+  const orderId = await generateUniqueOrderId();
   const razorpayOrder = await razorpay.orders.create({
-    amount: amountInPaisa,
+    amount: Math.round(totals.totalAmount * 100),
     currency: "INR",
     receipt: orderId,
     payment_capture: 1,
   });
 
-  const orderData = {
-    orderType,
-    customerInfo: customerId,
-    selectedVegetables: processedVegetables,
-    orderId,
-    couponCode: validatedCouponCode,
-    couponId,
-    ...totals,
-    ...(orderType === "basket" && { selectedOffer: offerId }),
-  };
-
   res.json(
     new ApiResponse(
       201,
-      { razorpayOrder, orderData },
-      "Razorpay order created. Complete payment to confirm order."
-    )
+      {
+        razorpayOrder,
+        orderData: {
+          orderType,
+          customerInfo: customerId,
+          selectedVegetables: processedVegetables,
+          orderId,
+          couponCode: validatedCode,
+          couponId,
+          ...totals,
+          deliveryAddressId,
+          ...(orderType === "basket" && { selectedOffer: offerId }),
+        },
+      },
+      "Razorpay order created",
+    ),
   );
 });
 
@@ -936,234 +779,207 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     orderId,
     orderType,
     couponCode,
+    deliveryAddressId,
   } = req.body;
 
-  // Validation
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
     return res
       .status(400)
-      .json(new ApiResponse(400, null, "Missing payment verification data"));
+      .json(new ApiResponse(400, null, "Missing payment data"));
   }
-
   if (!customerInfo || !selectedVegetables || !orderId) {
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Missing order data"));
   }
-
   if (orderType === "basket" && !selectedOffer) {
-    return res
-      .status(400)
-      .json(new ApiResponse(400, null, "Missing offer for basket order"));
+    return res.status(400).json(new ApiResponse(400, null, "Missing offer"));
   }
 
-  // Verify signature
-  const body = `${razorpay_order_id}|${razorpay_payment_id}`;
-  const expectedSignature = crypto
+  const expectedSig = crypto
     .createHmac("sha256", process.env.RAZORPAY_SECRET)
-    .update(body)
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
     .digest("hex");
 
-  if (expectedSignature !== razorpay_signature) {
+  if (expectedSig !== razorpay_signature) {
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Invalid signature"));
+  }
+  if (await Order.exists({ razorpayPaymentId: razorpay_payment_id })) {
+    return res.status(400).json(new ApiResponse(400, null, "Order exists"));
+  }
+
+  const processed = await processOrderData(
+    customerInfo,
+    selectedOffer,
+    selectedVegetables,
+    orderType,
+  );
+  if (processed.error)
+    return res.status(400).json(new ApiResponse(400, null, processed.error));
+
+  const { customerId, offerId, processedVegetables } = processed;
+
+  let subtotal =
+    orderType === "basket"
+      ? (await Offer.findById(offerId, { price: 1 }).lean()).price
+      : processedVegetables.reduce((sum, i) => sum + i.subtotal, 0);
+
+  let couponId = null,
+    couponDiscount = 0,
+    validatedCode = null;
+  if (couponCode) {
+    try {
+      const v = await validateCoupon(couponCode, subtotal, customerId);
+      couponId = v.couponId;
+      couponDiscount = v.couponDiscount;
+      validatedCode = v.validatedCouponCode;
+    } catch (err) {
+      console.error("Coupon error:", err.message);
+    }
+  }
+
+  const totals = calculateOrderTotal(
+    processedVegetables,
+    orderType === "basket"
+      ? (await Offer.findById(offerId, { price: 1 }).lean()).price
+      : null,
+    orderType,
+    couponDiscount,
+  );
+
+  let stockUpdates;
+  try {
+    stockUpdates = await updateStock(processedVegetables, "deduct");
+  } catch (err) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Stock unavailable"));
+  }
+
+  let result;
+  try {
+    result = await createOrderWithRetry({
+      orderType,
+      customerInfo: customerId,
+      selectedVegetables: processedVegetables,
+      orderDate: new Date(),
+      couponCode: validatedCode,
+      couponId,
+      ...totals,
+      orderId,
+      paymentMethod: "ONLINE",
+      orderStatus: "placed",
+      paymentStatus: "completed",
+      razorpayOrderId: razorpay_order_id,
+      razorpayPaymentId: razorpay_payment_id,
+      stockUpdates,
+      deliveryAddressId,
+      ...(orderType === "basket" && { selectedOffer: offerId }),
+    });
+  } catch (err) {
+    await updateStock(processedVegetables, "restore");
+    return res.status(500).json(new ApiResponse(500, null, err.message));
+  }
+
+  if (couponId) await incrementCouponUsage(couponId, customerId);
+  await User.findByIdAndUpdate(customerId, {
+    $push: { orders: result.order._id },
+  });
+
+  const populated = await Order.findById(result.order._id)
+    .populate("customerInfo", "name email phone")
+    .populate("deliveryAddressId")
+    .populate("selectedOffer")
+    .populate("selectedVegetables.vegetable", "name")
+    .lean();
+
+  processOrderInvoice(populated._id, {
+    sendEmail: true,
+    emailType: "invoice",
+  }).catch(console.error);
+  
+  // Send admin notification
+  sendAdminOrderNotification(populated).catch(console.error);
+  
+  res.json(new ApiResponse(200, populated, "Payment verified"));
+});
+
+export const updateOrderStatus = asyncHandler(async (req, res) => {
+  const { _id } = req.params;
+  const { orderStatus } = req.body;
+
+  if (!CONFIG.validStatuses.has(orderStatus)) {
     return res
       .status(400)
       .json(
         new ApiResponse(
           400,
           null,
-          "Payment verification failed - Invalid signature"
-        )
+          `Invalid status. Use: ${[...CONFIG.validStatuses].join(", ")}`,
+        ),
       );
   }
 
-  // Check duplicate
-  const existingOrder = await Order.exists({
-    razorpayPaymentId: razorpay_payment_id,
-  });
+  const current = await Order.findById(_id, {
+    orderStatus: 1,
+    selectedVegetables: 1,
+  }).lean();
+  if (!current)
+    return res.status(404).json(new ApiResponse(404, null, "Order not found"));
 
-  if (existingOrder) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(400, null, "Order already exists for this payment")
-      );
-  }
-
-  // Process order data
-  const processed = await processOrderData(
-    customerInfo,
-    selectedOffer,
-    selectedVegetables,
-    orderType
-  );
-
-  if (processed.error) {
-    return res.status(400).json(new ApiResponse(400, null, processed.error));
-  }
-
-  const { customerId, offerId, processedVegetables } = processed;
-
-  // Validate and apply coupon
-  let couponId = null;
-  let couponDiscount = 0;
-  let validatedCouponCode = null;
-  let subtotalForCoupon = 0;
-
-  if (orderType === "basket") {
-    const offer = await Offer.findById(offerId).select("price").lean();
-    if (!offer) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Offer not found"));
-    }
-    subtotalForCoupon = offer.price;
-  } else {
-    subtotalForCoupon = processedVegetables.reduce(
-      (sum, item) => sum + item.subtotal,
-      0
-    );
-  }
-
-  if (couponCode) {
+  if (orderStatus === "cancelled" && current.orderStatus !== "cancelled") {
     try {
-      const couponValidation = await validateAndApplyCoupon(
-        couponCode,
-        subtotalForCoupon,
-        customerId
-      );
-      couponId = couponValidation.couponId;
-      couponDiscount = couponValidation.couponDiscount;
-      validatedCouponCode = couponValidation.validatedCouponCode;
-    } catch (error) {
-      console.error("Coupon validation error during payment:", error.message);
+      await updateStock(current.selectedVegetables, "restore");
+    } catch (err) {
+      console.error("Stock restore error:", err.message);
     }
   }
 
-  // Calculate totals
-  let totals;
-  if (orderType === "basket") {
-    const offer = await Offer.findById(offerId).select("price").lean();
-    const subtotalAfterDiscount = Math.max(0, offer.price - couponDiscount);
-    totals = {
-      vegetablesTotal: 0,
-      offerPrice: offer.price,
-      couponDiscount,
-      subtotalAfterDiscount,
-      deliveryCharges: DELIVERY_CHARGES_RUPEES,
-      totalAmount: subtotalAfterDiscount + DELIVERY_CHARGES_RUPEES,
-    };
-  } else {
-    totals = calculateOrderTotal(
-      processedVegetables,
-      null,
-      orderType,
-      couponDiscount
+  const order = await Order.findByIdAndUpdate(
+    _id,
+    { orderStatus, paymentStatus: "completed" },
+    { new: true, runValidators: true },
+  )
+    .populate("customerInfo", "name email mobile phone address city area state")
+    .populate("selectedOffer")
+    .populate("selectedVegetables.vegetable", "name")
+    .lean();
+
+  if (order?.customerInfo?.email) {
+    const message = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background-color: #0e540b; color: white; padding: 20px; text-align: center;">
+          <h1>VegBazar</h1>
+        </div>
+        <div style="padding: 20px; background-color: #f8f9fa;">
+          <h2 style="color: #0e540b;">Order Status Updated</h2>
+          <p>Dear ${order.customerInfo.name || "Customer"},</p>
+          <p>Your order <strong>#${order.orderId}</strong> status has been updated to:</p>
+          <h3 style="color: #e57512; text-transform: uppercase; margin: 20px 0;">${orderStatus}</h3>
+          <p>Track your order or view details in your account.</p>
+          <p>Thank you for shopping with VegBazar!</p>
+        </div>
+        <div style="background-color: #0e540b; color: white; padding: 15px; text-align: center; font-size: 12px;">
+          <p>Need help? Contact us at info.vegbazar@gmail.com</p>
+        </div>
+      </div>
+    `;
+
+    sendInvoiceEmail(order, null, {
+      customSubject: `Order Status Update - #${order.orderId}`,
+      customMessage: message,
+      emailType: "statusUpdate",
+    }).catch((err) =>
+      console.error(
+        `Failed to send status email for order ${order.orderId}:`,
+        err.message,
+      ),
     );
   }
 
-  // Deduct stock after successful payment
-  let stockUpdates;
-  try {
-    stockUpdates = await deductVegetableStock(processedVegetables);
-  } catch (error) {
-    console.error("Stock deduction failed after payment:", error.message);
-    return res
-      .status(500)
-      .json(
-        new ApiResponse(
-          500,
-          null,
-          "Payment successful but stock unavailable. Please contact support."
-        )
-      );
-  }
-
-  // Create order
-  const orderData = {
-    orderType,
-    customerInfo: customerId,
-    selectedVegetables: processedVegetables,
-    orderDate: new Date(),
-    couponCode: validatedCouponCode,
-    couponId,
-    ...totals,
-    orderId,
-    paymentMethod: "ONLINE",
-    orderStatus: "placed",
-    paymentStatus: "completed",
-    razorpayOrderId: razorpay_order_id,
-    razorpayPaymentId: razorpay_payment_id,
-    stockUpdates,
-    ...(orderType === "basket" && { selectedOffer: offerId }),
-  };
-
-  const order = await Order.create(orderData);
-
-  if (couponId) {
-    await incrementCouponUsage(couponId, customerId);
-  }
-
-  const populatedOrder = await Order.findById(order._id)
-    .populate("customerInfo")
-    .populate("selectedOffer")
-    .populate("selectedVegetables.vegetable");
-
-  res.json(
-    new ApiResponse(
-      200,
-      populatedOrder,
-      "Payment verified and order saved successfully"
-    )
-  );
-});
-
-export const deleteOrder = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-
-  if (!/^[0-9a-fA-F]{24}$/.test(id)) {
-    return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
-  }
-
-  const result = await Order.findByIdAndDelete(id);
-
-  if (!result) {
-    return res.status(404).json(new ApiResponse(404, null, "Order not found"));
-  }
-
-  res.json(new ApiResponse(200, result, "Order deleted successfully"));
-});
-
-export const updateOrder = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const updateData = req.body;
-
-  if (!/^[0-9a-fA-F]{24}$/.test(id)) {
-    return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
-  }
-
-  // Prevent updating sensitive fields
-  delete updateData.razorpayOrderId;
-  delete updateData.razorpayPaymentId;
-  delete updateData.totalAmount;
-  delete updateData.vegetablesTotal;
-  delete updateData.offerPrice;
-  delete updateData.orderType;
-  delete updateData.couponDiscount;
-  delete updateData.subtotalAfterDiscount;
-
-  const order = await Order.findByIdAndUpdate(id, updateData, {
-    new: true,
-    runValidators: true,
-  })
-    .populate("customerInfo")
-    .populate("selectedOffer")
-    .populate("selectedVegetables.vegetable");
-
-  if (!order) {
-    return res.status(404).json(new ApiResponse(404, null, "Order not found"));
-  }
-
-  res.json(new ApiResponse(200, order, "Order updated successfully"));
+  res.json(new ApiResponse(200, order, "Order status updated"));
 });
 
 export const getRazorpayKey = asyncHandler(async (req, res) => {
@@ -1172,87 +988,64 @@ export const getRazorpayKey = asyncHandler(async (req, res) => {
       .status(500)
       .json(new ApiResponse(500, null, "Razorpay key not configured"));
   }
-
   res.json(
-    new ApiResponse(
-      200,
-      { key: process.env.RAZORPAY_KEY_ID },
-      "Razorpay key fetched successfully"
-    )
+    new ApiResponse(200, { key: process.env.RAZORPAY_KEY_ID }, "Key fetched"),
   );
 });
 
 export const calculatePrice = asyncHandler(async (req, res) => {
   const { items, couponCode } = req.body;
-
-  if (!items || !Array.isArray(items) || items.length === 0) {
-    throw new ApiError(400, "Items array is required and cannot be empty");
-  }
+  if (!items || !Array.isArray(items) || !items.length)
+    throw new ApiError(400, "Items required");
 
   let subtotal = 0;
   const calculatedItems = [];
 
   for (const item of items) {
-    if (!item.vegetableId || !item.weight || !item.quantity) {
-      throw new ApiError(
-        400,
-        "Each item must have vegetableId, weight, and quantity"
-      );
+    if (
+      !item.vegetableId ||
+      !item.weight ||
+      !item.quantity ||
+      item.quantity < 1
+    ) {
+      throw new ApiError(400, "Invalid item");
     }
 
-    if (item.quantity < 1) {
-      throw new ApiError(400, "Quantity must be at least 1");
-    }
-
-    const vegetable = await Vegetable.findById(item.vegetableId).lean();
-    if (!vegetable) {
+    const veg = await Vegetable.findById(item.vegetableId).lean();
+    if (!veg)
       throw new ApiError(404, `Vegetable not found: ${item.vegetableId}`);
-    }
 
     try {
-      const priceInfo = getPrice(vegetable, item.weight, item.quantity);
-
-      const calculatedItem = {
+      const priceInfo = getPrice(veg, item.weight, item.quantity);
+      calculatedItems.push({
         vegetableId: item.vegetableId,
-        name: vegetable.name,
-        pricingType: vegetable.pricingType,
+        name: veg.name,
+        pricingType: veg.pricingType,
         quantity: item.quantity,
         pricePerUnit: priceInfo.pricePerUnit,
         subtotal: priceInfo.subtotal,
-      };
-
-      if (priceInfo.type === "set") {
-        calculatedItem.weight = item.weight;
-        calculatedItem.setLabel = priceInfo.label;
-        calculatedItem.setQuantity = priceInfo.setQuantity;
-        calculatedItem.setUnit = priceInfo.setUnit;
-      } else {
-        calculatedItem.weight = priceInfo.weight;
-      }
-
-      calculatedItems.push(calculatedItem);
+        ...(priceInfo.type === "set"
+          ? {
+              weight: item.weight,
+              setLabel: priceInfo.label,
+              setQuantity: priceInfo.setQuantity,
+              setUnit: priceInfo.setUnit,
+            }
+          : { weight: priceInfo.weight }),
+      });
       subtotal += priceInfo.subtotal;
     } catch (error) {
-      throw new ApiError(
-        400,
-        `Error processing ${vegetable.name}: ${error.message}`
-      );
+      throw new ApiError(400, `Error processing ${veg.name}: ${error.message}`);
     }
   }
 
-  // Apply coupon discount (non-blocking)
-  let couponDiscount = 0;
-  let couponDetails = null;
-
+  let couponDiscount = 0,
+    couponDetails = null;
   if (couponCode) {
     try {
-      const couponValidation = await validateAndApplyCoupon(
-        couponCode,
-        subtotal,
-        null
-      );
-      couponDiscount = couponValidation.couponDiscount;
-      couponDetails = couponValidation.couponDetails;
+      const v = await validateCoupon(couponCode, subtotal, null);
+      couponDiscount = v.couponDiscount;
+      couponDetails = v.couponDetails;
     } catch (error) {
       couponDetails = {
         code: couponCode,
@@ -1262,13 +1055,11 @@ export const calculatePrice = asyncHandler(async (req, res) => {
     }
   }
 
-  // Calculate final amounts
   const subtotalAfterDiscount = Math.max(0, subtotal - couponDiscount);
-  const freeDelivery = subtotalAfterDiscount > FREE_DELIVERY_THRESHOLD;
-  const appliedDeliveryCharges = freeDelivery ? 0 : DELIVERY_CHARGES_RUPEES;
-  const totalAmount = subtotalAfterDiscount + appliedDeliveryCharges;
+  const freeDelivery = subtotalAfterDiscount > CONFIG.freeDeliveryThreshold;
+  const delivery = freeDelivery ? 0 : CONFIG.deliveryCharges;
 
-  return res.json(
+  res.json(
     new ApiResponse(
       200,
       {
@@ -1278,70 +1069,66 @@ export const calculatePrice = asyncHandler(async (req, res) => {
           subtotal,
           couponDiscount,
           subtotalAfterDiscount,
-          deliveryCharges: appliedDeliveryCharges,
+          deliveryCharges: delivery,
           freeDelivery,
-          totalAmount,
+          totalAmount: subtotalAfterDiscount + delivery,
         },
         timestamp: new Date().toISOString(),
       },
-      "Price calculation successful"
-    )
+      "Price calculated",
+    ),
   );
 });
 
 export const validateCouponForBasket = asyncHandler(async (req, res) => {
   const { offerId, offerPrice, couponCode } = req.body;
 
-  if (!offerId || !offerPrice) {
+  if (!offerId || !offerPrice)
     throw new ApiError(400, "Offer ID and price are required");
-  }
+  if (!couponCode) throw new ApiError(400, "Coupon code is required");
 
-  if (!couponCode) {
-    throw new ApiError(400, "Coupon code is required");
-  }
+  const [offer, coupon] = await Promise.all([
+    Offer.findById(offerId).select("price").lean(),
+    Coupon.findOne({ code: couponCode.toUpperCase(), isActive: true }).lean(),
+  ]);
 
-  const offer = await Offer.findById(offerId).select("price").lean();
-  if (!offer) {
-    throw new ApiError(404, "Offer not found");
-  }
-
-  if (offer.price !== offerPrice) {
+  if (!offer) throw new ApiError(404, "Offer not found");
+  if (offer.price !== offerPrice)
     throw new ApiError(400, "Offer price mismatch");
-  }
 
   let couponDetails = null;
   let couponDiscount = 0;
 
-  try {
-    const coupon = await Coupon.findOne({
-      code: couponCode.toUpperCase(),
-      isActive: true,
-    }).lean();
-
-    if (!coupon) {
-      throw new Error("Invalid coupon code");
-    }
-
-    if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
-      throw new Error("Coupon has expired");
-    }
-
-    if (coupon.minOrderAmount && offerPrice < coupon.minOrderAmount) {
-      throw new Error(
-        `Minimum order amount of ₹${coupon.minOrderAmount} required for this coupon`
-      );
-    }
-
-    if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
-      throw new Error("Coupon usage limit reached");
-    }
-
-    // Calculate discount inline
+  if (!coupon) {
+    couponDetails = {
+      code: couponCode,
+      applied: false,
+      error: "Invalid coupon code",
+    };
+  } else if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
+    couponDetails = {
+      code: couponCode,
+      applied: false,
+      error: "Coupon has expired",
+    };
+  } else if (coupon.minOrderAmount && offerPrice < coupon.minOrderAmount) {
+    couponDetails = {
+      code: couponCode,
+      applied: false,
+      error: `Minimum order amount of ₹${coupon.minOrderAmount} required`,
+    };
+  } else if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
+    couponDetails = {
+      code: couponCode,
+      applied: false,
+      error: "Coupon usage limit reached",
+    };
+  } else {
     couponDiscount =
       coupon.discountType === "percentage"
         ? Math.min(
             (offerPrice * coupon.discountValue) / 100,
-            coupon.maxDiscount || Infinity
+            coupon.maxDiscount || Infinity,
           )
         : Math.min(coupon.discountValue, offerPrice);
 
@@ -1352,16 +1139,10 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
       applied: true,
       discount: couponDiscount,
     };
-  } catch (error) {
-    couponDetails = {
-      code: couponCode,
-      applied: false,
-      error: error.message,
-    };
   }
 
   const subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
-  const totalAmount = subtotalAfterDiscount + DELIVERY_CHARGES_RUPEES;
+  const totalAmount = subtotalAfterDiscount + CONFIG.deliveryCharges;
 
   return res.json(
     new ApiResponse(
@@ -1371,67 +1152,47 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
         offerPrice,
         couponDiscount,
         subtotalAfterDiscount,
-        deliveryCharges: DELIVERY_CHARGES_RUPEES,
+        deliveryCharges: CONFIG.deliveryCharges,
         totalAmount,
       },
-      "Coupon validation completed"
-    )
+      "Coupon validation completed",
+    ),
   );
 });
 
-export const getOrdersByDateTimeRange = async (req, res) => {
-  try {
-    const { startDate, startTime, endDate, endTime } = req.query;
+// ================= ADVANCED ANALYTICS WITH HASHMAP AGGREGATION =================
+export const getOrdersByDateTimeRange = asyncHandler(async (req, res) => {
+  const { startDate, startTime, endDate, endTime } = req.query;
 
-    if (!startDate || !startTime || !endDate || !endTime) {
-      return res.status(400).json({
-        success: false,
-        message: "startDate, startTime, endDate, and endTime are required",
-        example:
-          "?startDate=2024-01-15&startTime=09:00&endDate=2024-01-20&endTime=18:00",
-      });
-    }
+  if (!startDate || !startTime || !endDate || !endTime) {
+    throw new ApiError(400, "All date-time parameters are required");
+  }
 
-    const startDateTime = new Date(`${startDate}T${startTime}:00`);
-    const endDateTime = new Date(`${endDate}T${endTime}:00`);
+  const startDateTime = new Date(`${startDate}T${startTime}:00`);
+  const endDateTime = new Date(`${endDate}T${endTime}:00`);
 
-    if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid date or time format",
-        example: "startDate: YYYY-MM-DD, startTime: HH:MM",
-      });
-    }
+  if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
+    throw new ApiError(400, "Invalid date or time format");
+  }
+  if (startDateTime > endDateTime) {
+    throw new ApiError(400, "Start date-time cannot be after end date-time");
+  }
 
-    if (startDateTime > endDateTime) {
-      return res.status(400).json({
-        success: false,
-        message: "Start date-time cannot be after end date-time",
-      });
-    }
+  const orders = await Order.find({
+    orderDate: { $gte: startDateTime, $lte: endDateTime },
+    orderStatus: { $nin: ["delivered", "cancelled", "Delivered", "Cancelled"] },
+  })
+    .populate("customerInfo", "name")
+    .populate("selectedVegetables.vegetable", "name")
+    .lean();
 
-    // Use lean() for better performance
-    const orders = await Order.find({
-      orderDate: {
-        $gte: startDateTime,
-        $lte: endDateTime,
-      },
-      orderStatus: {
-        $nin: ["delivered", "cancelled", "Delivered", "Cancelled"],
-      },
-    })
-      .populate("customerInfo")
-      .populate("selectedVegetables.vegetable")
-      .lean();
-
-    if (!orders || orders.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: "No orders found in the specified date-time range",
-        data: {
+  if (!orders.length) {
+    return res.json(
+      new ApiResponse(
+        200,
+        {
           orders: [],
           totalOrders: 0,
-          dateTimeRange: { start: startDateTime, end: endDateTime },
           summary: {
             totalOrders: 0,
             totalRevenue: 0,
@@ -1441,122 +1202,121 @@ export const getOrdersByDateTimeRange = async (req, res) => {
           },
           vegetableData: {},
         },
-      });
-    }
+        "No orders found",
+      ),
+    );
+  }
 
-    // Optimized calculation - with order status check
-    const vegData = {};
-    let totalRevenue = 0;
+  const vegDataMap = new Map();
+  let totalRevenue = 0;
 
-    orders.forEach((order) => {
-      // Double-check: Skip cancelled and delivered orders
-      const status = (order.orderStatus || "").toLowerCase();
-      if (status === "cancelled" || status === "delivered") {
-        return; // Skip this order completely
+  for (const order of orders) {
+    const status = (order.orderStatus || "").toLowerCase();
+    if (status === "cancelled" || status === "delivered") continue;
+
+    totalRevenue += order.totalAmount || 0;
+
+    for (const item of order.selectedVegetables) {
+      const vegName = item.vegetable?.name || "Unknown";
+
+      if (!vegDataMap.has(vegName)) {
+        vegDataMap.set(vegName, {
+          totalWeightKg: 0,
+          totalWeightG: 0,
+          totalPieces: 0,
+          totalBundles: 0,
+          orders: 0,
+          breakdown: [],
+        });
       }
 
-      totalRevenue += order.totalAmount || 0;
+      const veg = vegDataMap.get(vegName);
+      const isSet = item.weight?.startsWith("set");
 
-      order.selectedVegetables.forEach((item) => {
-        const vegName = item.vegetable?.name || "Unknown";
+      let weightKg = 0,
+        pieces = 0,
+        bundles = 0,
+        display = "";
 
-        if (!vegData[vegName]) {
-          vegData[vegName] = {
-            totalWeightKg: 0,
-            totalWeightG: 0,
-            totalPieces: 0,
-            totalBundles: 0,
-            orders: 0,
-            breakdown: [],
-          };
-        }
-
-        const veg = vegData[vegName];
-        const isSet = item.weight?.startsWith("set");
-
-        let weightKg = 0;
-        let pieces = 0;
-        let bundles = 0;
-        let display = "";
-
-        if (isSet) {
-          const qty = (item.setQuantity || 0) * item.quantity;
-          if (item.setUnit === "pieces") {
-            pieces = qty;
-            display = `${qty} pieces`;
-          } else if (item.setUnit === "bundles") {
-            bundles = qty;
-            display = `${qty} bundles`;
-          } else {
-            pieces = qty;
-            display = `${qty} ${item.setUnit}`;
-          }
+      if (isSet) {
+        const qty = (item.setQuantity || 0) * item.quantity;
+        if (item.setUnit === "pieces") {
+          pieces = qty;
+          display = `${qty} pieces`;
+        } else if (item.setUnit === "bundles") {
+          bundles = qty;
+          display = `${qty} bundles`;
         } else {
-          weightKg = (WEIGHT_TO_KG[item.weight] || 0) * item.quantity;
-          display =
-            weightKg >= 1 ? `${weightKg}kg` : `${Math.round(weightKg * 1000)}g`;
+          pieces = qty;
+          display = `${qty} ${item.setUnit}`;
         }
+      } else {
+        weightKg = (CONFIG.weightToKg.get(item.weight) || 0) * item.quantity;
+        display =
+          weightKg >= 1 ? `${weightKg}kg` : `${Math.round(weightKg * 1000)}g`;
+      }
 
-        veg.totalWeightKg += weightKg;
-        veg.totalPieces += pieces;
-        veg.totalBundles += bundles;
-        veg.orders++;
+      veg.totalWeightKg += weightKg;
+      veg.totalPieces += pieces;
+      veg.totalBundles += bundles;
+      veg.orders++;
 
-        veg.breakdown.push({
-          orderId: order.orderId,
-          itemType: isSet ? item.setUnit : "weight",
-          originalWeight: item.weight,
-          quantity: item.quantity,
-          ...(isSet && {
-            setInfo: {
-              setLabel: item.setLabel,
-              setQuantity: item.setQuantity,
-              setUnit: item.setUnit,
-            },
-          }),
-          calculatedAmount: display,
-          ...(weightKg > 0 && { weightKg }),
-          ...(pieces > 0 && { pieces }),
-          ...(bundles > 0 && { bundles }),
-          customerName: order.customerInfo?.name || "Unknown",
-          orderDate: order.orderDate,
-        });
+      veg.breakdown.push({
+        orderId: order.orderId,
+        itemType: isSet ? item.setUnit : "weight",
+        originalWeight: item.weight,
+        quantity: item.quantity,
+        ...(isSet && {
+          setInfo: {
+            setLabel: item.setLabel,
+            setQuantity: item.setQuantity,
+            setUnit: item.setUnit,
+          },
+        }),
+        calculatedAmount: display,
+        ...(weightKg > 0 && { weightKg }),
+        ...(pieces > 0 && { pieces }),
+        ...(bundles > 0 && { bundles }),
+        customerName: order.customerInfo?.name || "Unknown",
+        orderDate: order.orderDate,
       });
-    });
+    }
+  }
 
-    // Finalize calculations
-    let totalWeightKg = 0;
-    let totalPieces = 0;
+  let totalWeightKg = 0,
+    totalPieces = 0;
+  const vegData = {};
 
-    Object.keys(vegData).forEach((vegName) => {
-      const veg = vegData[vegName];
-      veg.totalWeightKg = Math.round(veg.totalWeightKg * 100) / 100;
-      veg.totalWeightG = Math.round(veg.totalWeightKg * 1000);
+  for (const [vegName, veg] of vegDataMap) {
+    veg.totalWeightKg = Math.round(veg.totalWeightKg * 100) / 100;
+    veg.totalWeightG = Math.round(veg.totalWeightKg * 1000);
 
-      const parts = [];
-      if (veg.totalWeightKg > 0) parts.push(`${veg.totalWeightKg}kg`);
-      if (veg.totalPieces > 0) parts.push(`${veg.totalPieces} pieces`);
-      if (veg.totalBundles > 0) parts.push(`${veg.totalBundles} bundles`);
-      veg.summary = parts.join(", ") || "No quantities";
+    const parts = [];
+    if (veg.totalWeightKg > 0) parts.push(`${veg.totalWeightKg}kg`);
+    if (veg.totalPieces > 0) parts.push(`${veg.totalPieces} pieces`);
+    if (veg.totalBundles > 0) parts.push(`${veg.totalBundles} bundles`);
+    veg.summary = parts.join(", ") || "No quantities";
 
-      totalWeightKg += veg.totalWeightKg;
-      totalPieces += veg.totalPieces + veg.totalBundles;
-    });
+    totalWeightKg += veg.totalWeightKg;
+    totalPieces += veg.totalPieces + veg.totalBundles;
 
-    const summary = {
-      totalOrders: orders.length,
-      totalRevenue,
-      totalVegetablesWeightKg: Math.round(totalWeightKg * 100) / 100,
-      totalVegetablesPieces: totalPieces,
-      uniqueVegetables: Object.keys(vegData).length,
-      dateRange: { from: startDate, to: endDate },
-      timeRange: { from: startTime, to: endTime },
-    };
+    vegData[vegName] = veg;
+  }
 
-    return res.status(200).json({
-      success: true,
-      message: "Orders retrieved successfully",
-      data: {
+  const summary = {
+    totalOrders: orders.length,
+    totalRevenue: Math.round(totalRevenue * 100) / 100,
+    totalVegetablesWeightKg: Math.round(totalWeightKg * 100) / 100,
+    totalVegetablesPieces: totalPieces,
+    uniqueVegetables: vegDataMap.size,
+    dateRange: { from: startDate, to: endDate },
+    timeRange: { from: startTime, to: endTime },
+  };
+
+  res.json(
+    new ApiResponse(
+      200,
+      {
         dateTimeRange: { start: startDateTime, end: endDateTime },
         summary,
         vegetableData: vegData,
@@ -1587,326 +1347,169 @@ export const getOrdersByDateTimeRange = async (req, res) => {
           }),
         })),
       },
-    });
-  } catch (error) {
-    console.error("Error fetching orders by date-time range:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch orders",
-      error: error.message,
-    });
+      "Orders retrieved successfully",
+    ),
+  );
+});
+
+export const getOrdersByStatus = asyncHandler(async (req, res) => {
+  const { status, startDate, endDate } = req.query;
+
+  if (!status) {
+    throw new ApiError(400, "Status parameter is required");
   }
-};
-export const getOrdersByStatus = async (req, res) => {
-  try {
-    const { status, startDate, endDate } = req.query;
 
-    // Validate status parameter
-    if (!status) {
-      return res.status(400).json({
-        success: false,
-        message: "Status parameter is required",
-        example:
-          "?status=pending or ?status=confirmed&startDate=2024-01-15&endDate=2024-01-20",
-        availableStatuses: [
-          "pending",
-          "processing",
-          "confirmed",
-          "delivered",
-          "cancelled",
-        ],
-      });
+  const query = { orderStatus: new RegExp(`^${status}$`, "i") };
+
+  if (startDate || endDate) {
+    query.orderDate = {};
+    if (startDate) {
+      const start = new Date(`${startDate}T00:00:00`);
+      if (!isNaN(start.getTime())) query.orderDate.$gte = start;
     }
-
-    // Build query object
-    const query = {
-      orderStatus: new RegExp(`^${status}$`, "i"), // Case-insensitive match
-    };
-
-    // Add date range filter if provided
-    if (startDate || endDate) {
-      query.orderDate = {};
-
-      if (startDate) {
-        const start = new Date(`${startDate}T00:00:00`);
-        if (isNaN(start.getTime())) {
-          return res.status(400).json({
-            success: false,
-            message: "Invalid startDate format. Use YYYY-MM-DD",
-          });
-        }
-        query.orderDate.$gte = start;
-      }
-
-      if (endDate) {
-        const end = new Date(`${endDate}T23:59:59`);
-        if (isNaN(end.getTime())) {
-          return res.status(400).json({
-            success: false,
-            message: "Invalid endDate format. Use YYYY-MM-DD",
-          });
-        }
-        query.orderDate.$lte = end;
-      }
+    if (endDate) {
+      const end = new Date(`${endDate}T23:59:59`);
+      if (!isNaN(end.getTime())) query.orderDate.$lte = end;
     }
+  }
 
-    // Fetch orders with populated data
-    const orders = await Order.find(query)
-      .populate("customerInfo")
-      .populate("selectedVegetables.vegetable")
-      .sort({ orderDate: -1 }) // Most recent first
-      .lean();
+  const orders = await Order.find(query)
+    .populate("customerInfo", "name phone")
+    .populate("selectedVegetables.vegetable", "name")
+    .sort({ orderDate: -1 })
+    .lean();
 
-    if (!orders || orders.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: `No orders found with status: ${status}`,
-        data: {
+  if (!orders.length) {
+    return res.json(
+      new ApiResponse(
+        200,
+        {
           orders: [],
           totalOrders: 0,
-          status: status,
-          summary: {
-            totalOrders: 0,
-            totalRevenue: 0,
-            totalVegetablesWeightKg: 0,
-            totalVegetablesPieces: 0,
-            uniqueVegetables: 0,
-          },
+          summary: { totalOrders: 0, totalRevenue: 0 },
           vegetableData: {},
         },
-      });
-    }
-
-    // Calculate vegetable data and totals
-    const vegData = {};
-    let totalRevenue = 0;
-
-    orders.forEach((order) => {
-      totalRevenue += order.totalAmount || 0;
-
-      order.selectedVegetables.forEach((item) => {
-        const vegName = item.vegetable?.name || "Unknown";
-
-        if (!vegData[vegName]) {
-          vegData[vegName] = {
-            totalWeightKg: 0,
-            totalWeightG: 0,
-            totalPieces: 0,
-            totalBundles: 0,
-            orders: 0,
-            breakdown: [],
-          };
-        }
-
-        const veg = vegData[vegName];
-        const isSet = item.weight?.startsWith("set");
-
-        let weightKg = 0;
-        let pieces = 0;
-        let bundles = 0;
-        let display = "";
-
-        if (isSet) {
-          const qty = (item.setQuantity || 0) * item.quantity;
-          if (item.setUnit === "pieces") {
-            pieces = qty;
-            display = `${qty} pieces`;
-          } else if (item.setUnit === "bundles") {
-            bundles = qty;
-            display = `${qty} bundles`;
-          } else {
-            pieces = qty;
-            display = `${qty} ${item.setUnit}`;
-          }
-        } else {
-          weightKg = (WEIGHT_TO_KG[item.weight] || 0) * item.quantity;
-          display =
-            weightKg >= 1 ? `${weightKg}kg` : `${Math.round(weightKg * 1000)}g`;
-        }
-
-        veg.totalWeightKg += weightKg;
-        veg.totalPieces += pieces;
-        veg.totalBundles += bundles;
-        veg.orders++;
-
-        veg.breakdown.push({
-          orderId: order.orderId,
-          itemType: isSet ? item.setUnit : "weight",
-          originalWeight: item.weight,
-          quantity: item.quantity,
-          ...(isSet && {
-            setInfo: {
-              setLabel: item.setLabel,
-              setQuantity: item.setQuantity,
-              setUnit: item.setUnit,
-            },
-          }),
-          calculatedAmount: display,
-          ...(weightKg > 0 && { weightKg }),
-          ...(pieces > 0 && { pieces }),
-          ...(bundles > 0 && { bundles }),
-          customerName: order.customerInfo?.name || "Unknown",
-          orderDate: order.orderDate,
-        });
-      });
-    });
-
-    // Finalize vegetable calculations
-    let totalWeightKg = 0;
-    let totalPieces = 0;
-
-    Object.keys(vegData).forEach((vegName) => {
-      const veg = vegData[vegName];
-      veg.totalWeightKg = Math.round(veg.totalWeightKg * 100) / 100;
-      veg.totalWeightG = Math.round(veg.totalWeightKg * 1000);
-
-      const parts = [];
-      if (veg.totalWeightKg > 0) parts.push(`${veg.totalWeightKg}kg`);
-      if (veg.totalPieces > 0) parts.push(`${veg.totalPieces} pieces`);
-      if (veg.totalBundles > 0) parts.push(`${veg.totalBundles} bundles`);
-      veg.summary = parts.join(", ") || "No quantities";
-
-      totalWeightKg += veg.totalWeightKg;
-      totalPieces += veg.totalPieces + veg.totalBundles;
-    });
-
-    const summary = {
-      totalOrders: orders.length,
-      totalRevenue: Math.round(totalRevenue * 100) / 100,
-      totalVegetablesWeightKg: Math.round(totalWeightKg * 100) / 100,
-      totalVegetablesPieces: totalPieces,
-      uniqueVegetables: Object.keys(vegData).length,
-      status: status,
-      ...(startDate && { dateFrom: startDate }),
-      ...(endDate && { dateTo: endDate }),
-    };
-
-    return res.status(200).json({
-      success: true,
-      message: `Orders with status '${status}' retrieved successfully`,
-      data: {
-        summary,
-        vegetableData: vegData,
-        orders: orders.map((order) => ({
-          _id: order._id,
-          orderId: order.orderId,
-          customerName: order.customerInfo?.name || "Unknown",
-          customerPhone: order.customerInfo?.phone,
-          orderDate: order.orderDate,
-          totalAmount: order.totalAmount,
-          paymentStatus: order.paymentStatus,
-          orderStatus: order.orderStatus,
-          deliveryAddress: order.deliveryAddress,
-          vegetables: order.selectedVegetables.map((item) => {
-            const isSet = item.weight?.startsWith("set");
-            return {
-              name: item.vegetable?.name || "Unknown",
-              weight: item.weight,
-              quantity: item.quantity,
-              subtotal: item.subtotal,
-              type: isSet ? "set-based" : "weight-based",
-              ...(isSet && {
-                setInfo: {
-                  label: item.setLabel,
-                  quantity: item.setQuantity,
-                  unit: item.setUnit,
-                },
-              }),
-            };
-          }),
-        })),
-      },
-    });
-  } catch (error) {
-    console.error("Error fetching orders by status:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch orders by status",
-      error: error.message,
-    });
+        `No orders found with status: ${status}`,
+      ),
+    );
   }
-};
 
-/**
- * Get orders with multiple status filters
- * Query params:
- * - statuses (required): comma-separated list (e.g., pending,processing,confirmed)
- * - startDate (optional): YYYY-MM-DD
- * - endDate (optional): YYYY-MM-DD
- */
-export const getOrdersByMultipleStatuses = async (req, res) => {
-  try {
-    const { statuses, startDate, endDate } = req.query;
+  const vegDataMap = new Map();
+  let totalRevenue = 0,
+    totalWeightKg = 0,
+    totalPieces = 0;
 
-    if (!statuses) {
-      return res.status(400).json({
-        success: false,
-        message: "Statuses parameter is required",
-        example: "?statuses=pending,processing,confirmed",
-      });
+  for (const order of orders) {
+    totalRevenue += order.totalAmount || 0;
+
+    for (const item of order.selectedVegetables) {
+      const vegName = item.vegetable?.name || "Unknown";
+      if (!vegDataMap.has(vegName)) {
+        vegDataMap.set(vegName, {
+          totalWeightKg: 0,
+          totalPieces: 0,
+          totalBundles: 0,
+          orders: 0,
+        });
+      }
+
+      const veg = vegDataMap.get(vegName);
+      const isSet = item.weight?.startsWith("set");
+
+      if (isSet) {
+        const qty = (item.setQuantity || 0) * item.quantity;
+        if (item.setUnit === "pieces") veg.totalPieces += qty;
+        else if (item.setUnit === "bundles") veg.totalBundles += qty;
+        else veg.totalPieces += qty;
+      } else {
+        veg.totalWeightKg +=
+          (CONFIG.weightToKg.get(item.weight) || 0) * item.quantity;
+      }
+      veg.orders++;
     }
+  }
 
-    // Parse comma-separated statuses
-    const statusArray = statuses.split(",").map((s) => s.trim().toLowerCase());
+  const vegData = {};
+  for (const [vegName, veg] of vegDataMap) {
+    veg.totalWeightKg = Math.round(veg.totalWeightKg * 100) / 100;
+    totalWeightKg += veg.totalWeightKg;
+    totalPieces += veg.totalPieces + veg.totalBundles;
+    vegData[vegName] = veg;
+  }
 
-    // Build query
-    const query = {
-      orderStatus: {
-        $in: statusArray.map((s) => new RegExp(`^${s}$`, "i")),
-      },
-    };
+  const summary = {
+    totalOrders: orders.length,
+    totalRevenue: Math.round(totalRevenue * 100) / 100,
+    totalVegetablesWeightKg: Math.round(totalWeightKg * 100) / 100,
+    totalVegetablesPieces: totalPieces,
+    uniqueVegetables: Object.keys(vegData).length,
+    status,
+    ...(startDate && { dateFrom: startDate }),
+    ...(endDate && { dateTo: endDate }),
+  };
 
-    // Add date range if provided
-    if (startDate || endDate) {
-      query.orderDate = {};
-      if (startDate) {
-        const start = new Date(`${startDate}T00:00:00`);
-        if (!isNaN(start.getTime())) {
-          query.orderDate.$gte = start;
-        }
-      }
-      if (endDate) {
-        const end = new Date(`${endDate}T23:59:59`);
-        if (!isNaN(end.getTime())) {
-          query.orderDate.$lte = end;
-        }
-      }
+  res.json(
+    new ApiResponse(
+      200,
+      { summary, vegetableData: vegData, orders },
+      `Orders with status '${status}' retrieved successfully`,
+    ),
+  );
+});
+
+export const getOrdersByMultipleStatuses = asyncHandler(async (req, res) => {
+  const { statuses, startDate, endDate } = req.query;
+
+  if (!statuses) throw new ApiError(400, "Statuses parameter is required");
+
+  const statusSet = new Set(
+    statuses.split(",").map((s) => s.trim().toLowerCase()),
+  );
+  const query = {
+    orderStatus: {
+      $in: Array.from(statusSet).map((s) => new RegExp(`^${s}$`, "i")),
+    },
+  };
+
+  if (startDate || endDate) {
+    query.orderDate = {};
+    if (startDate) {
+      const start = new Date(`${startDate}T00:00:00`);
+      if (!isNaN(start.getTime())) query.orderDate.$gte = start;
     }
+    if (endDate) {
+      const end = new Date(`${endDate}T23:59:59`);
+      if (!isNaN(end.getTime())) query.orderDate.$lte = end;
+    }
+  }
 
-    const orders = await Order.find(query)
-      .populate("customerInfo")
-      .populate("selectedVegetables.vegetable")
-      .sort({ orderDate: -1 })
-      .lean();
+  const orders = await Order.find(query)
+    .populate("customerInfo", "name")
+    .populate("selectedVegetables.vegetable", "name")
+    .sort({ orderDate: -1 })
+    .lean();
 
-    // Group orders by status
-    const ordersByStatus = {};
-    statusArray.forEach((s) => {
-      ordersByStatus[s] = [];
-    });
+  const ordersByStatusMap = new Map();
+  statusSet.forEach((s) => ordersByStatusMap.set(s, []));
 
-    orders.forEach((order) => {
-      const orderStatus = order.orderStatus.toLowerCase();
-      if (ordersByStatus[orderStatus]) {
-        ordersByStatus[orderStatus].push(order);
-      }
-    });
+  let totalRevenue = 0;
+  for (const order of orders) {
+    const orderStatus = order.orderStatus.toLowerCase();
+    if (ordersByStatusMap.has(orderStatus)) {
+      ordersByStatusMap.get(orderStatus).push(order);
+    }
+    totalRevenue += order.totalAmount || 0;
+  }
 
-    // Calculate totals
-    let totalRevenue = 0;
-    orders.forEach((order) => {
-      totalRevenue += order.totalAmount || 0;
-    });
+  const statusCounts = {};
+  for (const [status, orderList] of ordersByStatusMap) {
+    statusCounts[status] = orderList.length;
+  }
 
-    const statusCounts = {};
-    Object.keys(ordersByStatus).forEach((status) => {
-      statusCounts[status] = ordersByStatus[status].length;
-    });
-
-    return res.status(200).json({
-      success: true,
-      message: "Orders retrieved successfully",
-      data: {
+  res.json(
+    new ApiResponse(
+      200,
+      {
         totalOrders: orders.length,
         totalRevenue: Math.round(totalRevenue * 100) / 100,
         statusCounts,
@@ -1920,80 +1523,61 @@ export const getOrdersByMultipleStatuses = async (req, res) => {
           paymentStatus: order.paymentStatus,
         })),
       },
-    });
-  } catch (error) {
-    console.error("Error fetching orders by multiple statuses:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch orders",
-      error: error.message,
-    });
-  }
-};
+      "Orders retrieved successfully",
+    ),
+  );
+});
 
-/**
- * Get order status statistics
- * Shows count and total revenue for each order status
- */
-export const getOrderStatusStats = async (req, res) => {
-  try {
-    const { startDate, endDate } = req.query;
+export const getOrderStatusStats = asyncHandler(async (req, res) => {
+  const { startDate, endDate } = req.query;
 
-    // Build date filter
-    const dateFilter = {};
-    if (startDate || endDate) {
-      dateFilter.orderDate = {};
-      if (startDate) {
-        const start = new Date(`${startDate}T00:00:00`);
-        if (!isNaN(start.getTime())) {
-          dateFilter.orderDate.$gte = start;
-        }
-      }
-      if (endDate) {
-        const end = new Date(`${endDate}T23:59:59`);
-        if (!isNaN(end.getTime())) {
-          dateFilter.orderDate.$lte = end;
-        }
-      }
+  const dateFilter = {};
+  if (startDate || endDate) {
+    dateFilter.orderDate = {};
+    if (startDate) {
+      const start = new Date(`${startDate}T00:00:00`);
+      if (!isNaN(start.getTime())) dateFilter.orderDate.$gte = start;
     }
+    if (endDate) {
+      const end = new Date(`${endDate}T23:59:59`);
+      if (!isNaN(end.getTime())) dateFilter.orderDate.$lte = end;
+    }
+  }
 
-    // Aggregate orders by status
-    const stats = await Order.aggregate([
-      ...(Object.keys(dateFilter).length > 0 ? [{ $match: dateFilter }] : []),
+  const stats = await Order.aggregate([
+    ...(Object.keys(dateFilter).length > 0 ? [{ $match: dateFilter }] : []),
+    {
+      $group: {
+        _id: { $toLower: "$orderStatus" },
+        count: { $sum: 1 },
+        totalRevenue: { $sum: "$totalAmount" },
+        avgOrderValue: { $avg: "$totalAmount" },
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        status: "$_id",
+        count: 1,
+        totalRevenue: { $round: ["$totalRevenue", 2] },
+        avgOrderValue: { $round: ["$avgOrderValue", 2] },
+      },
+    },
+    { $sort: { count: -1 } },
+  ]);
+
+  const overallTotal = stats.reduce(
+    (acc, stat) => ({
+      totalOrders: acc.totalOrders + stat.count,
+      totalRevenue: acc.totalRevenue + stat.totalRevenue,
+    }),
+    { totalOrders: 0, totalRevenue: 0 },
+  );
+
+  res.json(
+    new ApiResponse(
+      200,
       {
-        $group: {
-          _id: { $toLower: "$orderStatus" },
-          count: { $sum: 1 },
-          totalRevenue: { $sum: "$totalAmount" },
-          avgOrderValue: { $avg: "$totalAmount" },
-        },
-      },
-      {
-        $project: {
-          _id: 0,
-          status: "$_id",
-          count: 1,
-          totalRevenue: { $round: ["$totalRevenue", 2] },
-          avgOrderValue: { $round: ["$avgOrderValue", 2] },
-        },
-      },
-      { $sort: { count: -1 } },
-    ]);
-
-    // Calculate overall totals
-    const overallTotal = stats.reduce(
-      (acc, stat) => {
-        acc.totalOrders += stat.count;
-        acc.totalRevenue += stat.totalRevenue;
-        return acc;
-      },
-      { totalOrders: 0, totalRevenue: 0 }
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Order status statistics retrieved successfully",
-      data: {
         overallTotal: {
           totalOrders: overallTotal.totalOrders,
           totalRevenue: Math.round(overallTotal.totalRevenue * 100) / 100,
@@ -2002,13 +1586,7 @@ export const getOrderStatusStats = async (req, res) => {
         ...(startDate && { dateFrom: startDate }),
         ...(endDate && { dateTo: endDate }),
       },
-    });
-  } catch (error) {
-    console.error("Error fetching order status statistics:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch statistics",
-      error: error.message,
-    });
-  }
-};
+      "Statistics retrieved successfully",
+    ),
+  );
+});

@@ -5,14 +5,23 @@ import {
   deleteCity,
   updateCity,
 } from "../controller/City.js";
-import adminMiddleware from "../middleware/admin.js";
+
+import { verifyJWT, isAdmin } from "../middleware/auth.js";
 
 const router = Router();
 
+/* =======================
+   PUBLIC ROUTES
+======================= */
 
 router.get("/", getCities);
-router.post("/add", adminMiddleware, addCity);
-router.delete("/:id", adminMiddleware, deleteCity);
-router.patch("/:id", adminMiddleware, updateCity);
+
+/* =======================
+   ADMIN ROUTES
+======================= */
+
+router.post("/add", verifyJWT, isAdmin, addCity);
+router.delete("/:id", verifyJWT, isAdmin, deleteCity);
+router.patch("/:id", verifyJWT, isAdmin, updateCity);
 
 export default router;

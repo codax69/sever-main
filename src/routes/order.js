@@ -3,8 +3,6 @@ import {
   getOrders,
   getOrderById,
   addOrder,
-  deleteOrder,
-  updateOrder,
   verifyPayment,
   getRazorpayKey,
   calculateTodayOrderTotal,
@@ -16,33 +14,95 @@ import {
   getOrdersByMultipleStatuses,
   getOrderStatusStats,
 } from "../controller/order.js";
-import adminMiddleware from "../middleware/admin.js";
+
+import { verifyJWT, isAdmin, optionalAuth } from "../middleware/auth.js";
+
+// Custom role-based authorization middleware
+const authorizeRoles = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      throw new ApiError(401, "Authentication required");
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      throw new ApiError(
+        403,
+        `Access denied. Required roles: ${allowedRoles.join(", ")}`,
+      );
+    }
+
+    next();
+  };
+};
 
 const router = Router();
 
-// Public routes - accessible by all users
-router.get("/", getOrders);
-router.post("/validate-coupon-basket", validateCouponForBasket);
-
-// Order filtering routes
-router.get("/date-range", getOrdersByDateTimeRange);
-router.get("/status", getOrdersByStatus); // ?status=pending
-router.get("/statuses", getOrdersByMultipleStatuses); // ?statuses=pending,confirmed
-router.get("/status-stats", getOrderStatusStats); // Statistics by status
-
-// Protected routes - only admin can access
-router.get("/today/orders", calculateTodayOrderTotal);
-
-// Razorpay
-router.post("/create-order", addOrder);
-router.post("/verify-payment", verifyPayment);
+// ============= PUBLIC ROUTES =============
+// No authentication required
 router.get("/get-key", getRazorpayKey);
 router.post("/calculate-price", calculatePrice);
+router.post("/validate-coupon-basket", validateCouponForBasket);
 
-// Status update
-router.patch("/:_id/status", updateOrderStatus);
-router.delete("/:id", adminMiddleware, deleteOrder);
-router.patch("/:id", adminMiddleware, updateOrder);
-router.get("/:orderId", getOrderById);
+// ============= AUTHENTICATED USER ROUTES =============
+// Any logged-in user can access
+router.post("/create-order", verifyJWT, addOrder);
+router.post("/verify-payment", verifyJWT, verifyPayment);
+
+router.get(
+  "/all",
+  verifyJWT,
+  authorizeRoles("admin", "editor", "packaging", "delivery_partner"),
+  getOrders,
+);
+router.get("/:orderId", verifyJWT, getOrderById);
+
+// ============= ADMIN & EDITOR ROUTES =============
+// Admin and Editor roles only
+router.get("/today/total", calculateTodayOrderTotal);
+
+router.get(
+  "/date-range",
+  verifyJWT,
+  authorizeRoles("admin", "editor"),
+  getOrdersByDateTimeRange,
+);
+
+router.get(
+  "/statuses/multiple",
+  verifyJWT,
+  authorizeRoles("admin", "editor"),
+  getOrdersByMultipleStatuses,
+);
+
+router.get(
+  "/stats/status",
+  verifyJWT,
+  authorizeRoles("admin", "editor"),
+  getOrderStatusStats,
+);
+
+// ============= MULTI-ROLE ACCESS ROUTES =============
+// Admin, Editor, Packaging, Delivery Partner
+router.get(
+  "/status/:status",
+  verifyJWT,
+  authorizeRoles("admin", "editor", "packaging", "delivery_partner"),
+  getOrdersByStatus,
+);
+
+// ============= STATUS UPDATE ROUTES =============
+// Admin, Packaging, Delivery Partner
+router.patch(
+  "/:_id/status",
+  verifyJWT,
+  authorizeRoles("admin", "delivery_partner", "packaging"),
+  updateOrderStatus,
+);
+
+// ============= ADMIN ONLY ROUTES =============
+// Only admin can update or delete orders
+router.patch("/:id", verifyJWT, isAdmin);
+
+router.delete("/:id", verifyJWT, isAdmin);
 
 export default router;

@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "1.0.0",
+  "version": "0.0.2",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -16,10 +16,16 @@
     "cloudinary": "^2.7.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.0",
+    "dotenv": "^16.6.1",
+    "exceljs": "^4.4.0",
+    "express": "^4.22.1",
+    "express-jwt": "^8.5.1",
+    "express-oauth2-jwt-bearer": "^1.7.2",
+    "express-rate-limit": "^8.2.1",
+    "google-auth-library": "^10.5.0",
     "ioredis": "^5.7.0",
     "jsonwebtoken": "^9.0.2",
+    "jwks-rsa": "^3.2.0",
     "kit": "^2.0.30",
     "mongoose": "^8.6.3",
     "multer": "^2.0.2",
@@ -27,6 +33,7 @@
     "pdf": "^0.1.0",
     "pdfkit": "^0.17.2",
     "prettier": "^3.3.3",
+    "qrcode": "^1.5.4",
     "razorpay": "^2.9.6",
     "twilio": "^5.9.0"
   }
