@@ -123,7 +123,7 @@ class MinHeap {
 
 export const getVegetables = asyncHandler(async (req, res) => {
   const { sortBy, order, featured, popular, random, inStock, limit } = req.query;
-  
+  console.log("hello")
   const cacheKey = JSON.stringify(req.query);
   const cached = cache.get(cacheKey);
   
