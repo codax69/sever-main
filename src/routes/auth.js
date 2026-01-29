@@ -24,6 +24,7 @@ import {
   // Profile Management
   getCurrentUser,
   updateProfile,
+  updateUserDetails,
 
   // Admin User Management
   getAllUsers,
@@ -123,6 +124,7 @@ router.post("/refresh-token", refreshToken);
 router.post("/logout", verifyJWT, logout);
 router.get("/me", verifyJWT, getCurrentUser);
 router.put("/profile", verifyJWT, updateProfile);
+router.patch("/update-details", verifyJWT, updateUserDetails);
 router.put("/change-password", verifyJWT, changePassword);
 
 // ============= ADMIN ROUTES =============

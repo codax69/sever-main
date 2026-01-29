@@ -768,6 +768,83 @@ export const updateProfile = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, user, "Profile updated"));
 });
 
+export const updateUserDetails = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  const { username, email, phone } = req.body;
+
+  if (!username && !email && !phone) {
+    throw new ApiError(400, "At least one field (username, email, or phone) is required");
+  }
+
+  const updateData = {};
+
+  // Validate and add username
+  if (username) {
+    if (typeof username !== "string" || username.trim().length === 0) {
+      throw new ApiError(400, "Username must be a non-empty string");
+    }
+    updateData.username = username.trim();
+  }
+
+  // Validate and add email
+  if (email) {
+    if (!EMAIL_REGEX.test(email)) {
+      throw new ApiError(400, "Invalid email format");
+    }
+
+    // Check if email is already in use by another user
+    const existingUser = await User.findOne({ 
+      email: email.toLowerCase(), 
+      _id: { $ne: userId } 
+    }).lean().select("_id");
+
+    if (existingUser) {
+      throw new ApiError(400, "Email is already in use");
+    }
+
+    updateData.email = email.toLowerCase();
+  }
+
+  // Validate and add phone
+  if (phone) {
+    if (typeof phone !== "string") {
+      throw new ApiError(400, "Phone must be a string");
+    }
+    const digits = phone.replace(/\D/g, "");
+    if (digits.length < 10) {
+      throw new ApiError(400, "Phone number must be at least 10 digits");
+    }
+    updateData.phone = phone.trim();
+  }
+
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { $set: updateData },
+    { new: true, runValidators: true, select: "-password -refreshToken" },
+  );
+
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+
+  res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        user: {
+          id: user._id,
+          username: user.username,
+          email: user.email,
+          phone: user.phone,
+          role: user.role,
+          picture: user.picture,
+        },
+      },
+      "User details updated successfully",
+    ),
+  );
+});
+
 export const changePassword = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
   const { currentPassword, newPassword } = req.body;
