@@ -145,14 +145,14 @@ const fetchUser = async (userId) => {
 // ================= VERIFY JWT MIDDLEWARE =================
 export const verifyJWT = asyncHandler(async (req, res, next) => {
   const token = extractToken(req);
-
+ console.log(token)
   if (!token) {
     throw new ApiError(401, "Access token required. Please login.");
   }
 
   const decoded = verifyToken(token);
   req.user = await fetchUser(decoded.id);
-
+  console.log(req.user)
   next();
 });
 

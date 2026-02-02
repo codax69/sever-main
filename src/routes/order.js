@@ -16,6 +16,7 @@ import {
 } from "../controller/order.js";
 
 import { verifyJWT, isAdmin, optionalAuth } from "../middleware/auth.js";
+import { ApiError } from "../utility/ApiError.js";
 
 // Custom role-based authorization middleware
 const authorizeRoles = (...allowedRoles) => {
@@ -54,7 +55,6 @@ router.get(
   authorizeRoles("admin", "editor", "packaging", "delivery_partner"),
   getOrders,
 );
-router.get("/:orderId", verifyJWT, getOrderById);
 
 // ============= ADMIN & EDITOR ROUTES =============
 // Admin and Editor roles only
@@ -63,7 +63,7 @@ router.get("/today/total", calculateTodayOrderTotal);
 router.get(
   "/date-range",
   verifyJWT,
-  authorizeRoles("admin", "editor"),
+  // authorizeRoles("admin", "editor"),
   getOrdersByDateTimeRange,
 );
 
@@ -104,5 +104,5 @@ router.patch(
 router.patch("/:id", verifyJWT, isAdmin);
 
 router.delete("/:id", verifyJWT, isAdmin);
-
+router.get("/:orderId", verifyJWT, getOrderById);
 export default router;

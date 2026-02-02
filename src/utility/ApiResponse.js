@@ -1,9 +1,14 @@
 class ApiResponse {
-    constructor(statuscode,data,message){
+    constructor(statusCode, data, message){
         this.data = data
-        this.statuscode = statuscode
+        // keep original property for backward compatibility
+        this.statuscode = statusCode
+        // standard properties
+        this.status = statusCode
+        this.statusCode = statusCode
         this.message = message
-        this.success = statuscode <= 400
+        // success for HTTP is status < 400
+        this.success = statusCode < 400
     }
 }
 export {ApiResponse}

@@ -1,23 +1,23 @@
-import offer from "../Model/offer.js";
+import Basket from "../Model/basket.js";
 import Order from "../Model/order.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 
 // Helper function to calculate value score (quality to price ratio)
-const calculateValueScore = (offer) => {
-  const itemCount = offer.items?.length || 0;
-  const totalPrice = offer.totalPrice || offer.price || 0;
+const calculateValueScore = (basket) => {
+  const itemCount = basket.items?.length || 0;
+  const totalPrice = basket.totalPrice || basket.price || 0;
 
   if (totalPrice === 0) return 0;
 
   // Value score: more items per rupee = better value
   // Also consider discount percentage if available
-  const discountFactor = offer.discount ? 1 + offer.discount / 100 : 1;
+  const discountFactor = basket.discount ? 1 + basket.discount / 100 : 1;
   return (itemCount / totalPrice) * 100 * discountFactor;
 };
 
-// Get Most Selling offers
-export const getMostSellingOffers = asyncHandler(async (req, res) => {
+// Get Most Selling baskets
+export const getMostSellingBaskets = asyncHandler(async (req, res) => {
   const { limit = 10, category } = req.query;
 
   try {
@@ -27,10 +27,10 @@ export const getMostSellingOffers = asyncHandler(async (req, res) => {
       matchCriteria.category = category;
     }
 
-    // Aggregate offers with their order counts
-    const mostSellingOffers = await Order.aggregate([
+    // Aggregate baskets with their order counts
+    const mostSellingBaskets = await Order.aggregate([
       { $unwind: "$items" },
-      { $match: { "items.itemType": "offer" } },
+      { $match: { "items.itemType": "basket" } }, // Modified to check for basket
       {
         $group: {
           _id: "$items.itemId",
@@ -42,25 +42,25 @@ export const getMostSellingOffers = asyncHandler(async (req, res) => {
       { $limit: parseInt(limit) },
       {
         $lookup: {
-          from: "offers",
+          from: "baskets", // Modified collection name
           localField: "_id",
           foreignField: "_id",
-          as: "offerDetails",
+          as: "basketDetails", // Modified alias
         },
       },
-      { $unwind: "$offerDetails" },
+      { $unwind: "$basketDetails" },
       { $match: matchCriteria },
       {
         $project: {
-          _id: "$offerDetails._id",
-          name: "$offerDetails.name",
-          description: "$offerDetails.description",
-          price: "$offerDetails.price",
-          totalPrice: "$offerDetails.totalPrice",
-          discount: "$offerDetails.discount",
-          image: "$offerDetails.image",
-          items: "$offerDetails.items",
-          category: "$offerDetails.category",
+          _id: "$basketDetails._id",
+          name: "$basketDetails.name",
+          description: "$basketDetails.description",
+          price: "$basketDetails.price",
+          totalPrice: "$basketDetails.totalPrice",
+          discount: "$basketDetails.discount",
+          image: "$basketDetails.image",
+          items: "$basketDetails.items",
+          category: "$basketDetails.category",
           totalOrders: 1,
           totalQuantity: 1,
           tag: { $literal: "Most Selling" },
@@ -68,10 +68,9 @@ export const getMostSellingOffers = asyncHandler(async (req, res) => {
       },
     ]);
 
-    // If no orders found, get popular offers by other metrics
-    if (mostSellingOffers.length === 0) {
-      const fallbackOffers = await offer
-        .find(matchCriteria)
+    // If no orders found, get popular baskets by other metrics
+    if (mostSellingBaskets.length === 0) {
+      const fallbackBaskets = await Basket.find(matchCriteria)
         .sort({ views: -1, createdAt: -1 })
         .limit(parseInt(limit))
         .select("-__v");
@@ -79,32 +78,32 @@ export const getMostSellingOffers = asyncHandler(async (req, res) => {
       return res.json(
         new ApiResponse(
           200,
-          fallbackOffers.map((offer) => ({
-            ...offer.toObject(),
+          fallbackBaskets.map((basket) => ({
+            ...basket.toObject(),
             tag: "Popular",
           })),
-          "Popular offers fetched successfully"
-        )
+          "Popular baskets fetched successfully",
+        ),
       );
     }
 
     res.json(
       new ApiResponse(
         200,
-        mostSellingOffers,
-        "Most selling offers fetched successfully"
-      )
+        mostSellingBaskets,
+        "Most selling baskets fetched successfully",
+      ),
     );
   } catch (error) {
-    console.error("Error fetching most selling offers:", error);
+    console.error("Error fetching most selling baskets:", error);
     return res
       .status(500)
-      .json(new ApiResponse(500, null, "Failed to fetch most selling offers"));
+      .json(new ApiResponse(500, null, "Failed to fetch most selling baskets"));
   }
 });
 
-// Get Premium offers
-export const getPremiumOffers = asyncHandler(async (req, res) => {
+// Get Premium baskets
+export const getPremiumBaskets = asyncHandler(async (req, res) => {
   const { limit = 10, minPrice, category } = req.query;
 
   try {
@@ -114,7 +113,7 @@ export const getPremiumOffers = asyncHandler(async (req, res) => {
       matchCriteria.category = category;
     }
 
-    // Premium offers are high-priced, quality offers
+    // Premium baskets are high-priced, quality baskets
     if (minPrice) {
       matchCriteria.$or = [
         { price: { $gte: parseFloat(minPrice) } },
@@ -128,31 +127,34 @@ export const getPremiumOffers = asyncHandler(async (req, res) => {
       ];
     }
 
-    const premiumOffers = await offer
-      .find(matchCriteria)
+    const premiumBaskets = await Basket.find(matchCriteria)
       .sort({ totalPrice: -1, price: -1, rating: -1 })
       .limit(parseInt(limit))
       .select("-__v");
 
-    const offersWithTag = premiumOffers.map((offer) => ({
-      ...offer.toObject(),
+    const basketsWithTag = premiumBaskets.map((basket) => ({
+      ...basket.toObject(),
       tag: "Premium",
       isPremium: true,
     }));
 
     res.json(
-      new ApiResponse(200, offersWithTag, "Premium offers fetched successfully")
+      new ApiResponse(
+        200,
+        basketsWithTag,
+        "Premium baskets fetched successfully",
+      ),
     );
   } catch (error) {
-    console.error("Error fetching premium offers:", error);
+    console.error("Error fetching premium baskets:", error);
     return res
       .status(500)
-      .json(new ApiResponse(500, null, "Failed to fetch premium offers"));
+      .json(new ApiResponse(500, null, "Failed to fetch premium baskets"));
   }
 });
 
-// Get Best Value offers
-export const getBestValueoffers = asyncHandler(async (req, res) => {
+// Get Best Value baskets
+export const getBestValueBaskets = asyncHandler(async (req, res) => {
   const { limit = 10, maxPrice, category } = req.query;
 
   try {
@@ -169,34 +171,34 @@ export const getBestValueoffers = asyncHandler(async (req, res) => {
       ];
     }
 
-    const alloffers = await offer.find(matchCriteria).select("-__v");
+    const allBaskets = await Basket.find(matchCriteria).select("-__v");
 
-    // Calculate value score for each offer
-    const offersWithValue = alloffers.map((offer) => ({
-      ...offer.toObject(),
-      valueScore: calculateValueScore(offer.toObject()),
+    // Calculate value score for each basket
+    const basketsWithValue = allBaskets.map((basket) => ({
+      ...basket.toObject(),
+      valueScore: calculateValueScore(basket.toObject()),
       tag: "Best Value",
       isBestValue: true,
     }));
 
     // Sort by value score descending
-    offersWithValue.sort((a, b) => b.valueScore - a.valueScore);
+    basketsWithValue.sort((a, b) => b.valueScore - a.valueScore);
 
-    // Get top offers
-    const bestValueoffers = offersWithValue.slice(0, parseInt(limit));
+    // Get top baskets
+    const bestValueBaskets = basketsWithValue.slice(0, parseInt(limit));
 
     res.json(
       new ApiResponse(
         200,
-        bestValueoffers,
-        "Best value offers fetched successfully"
-      )
+        bestValueBaskets,
+        "Best value baskets fetched successfully",
+      ),
     );
   } catch (error) {
-    console.error("Error fetching best value offers:", error);
+    console.error("Error fetching best value baskets:", error);
     return res
       .status(500)
-      .json(new ApiResponse(500, null, "Failed to fetch best value offers"));
+      .json(new ApiResponse(500, null, "Failed to fetch best value baskets"));
   }
 });
 
@@ -209,9 +211,9 @@ export const getAllRecommendations = asyncHandler(async (req, res) => {
     // Fetch all recommendations in parallel
     const [mostSellingResult, premiumResult, bestValueResult] =
       await Promise.allSettled([
-        getMostSellingoffersInternal(limitNum, category),
-        getPremiumoffersInternal(limitNum, category),
-        getBestValueoffersInternal(limitNum, category),
+        getMostSellingBasketsInternal(limitNum, category),
+        getPremiumBasketsInternal(limitNum, category),
+        getBestValueBasketsInternal(limitNum, category),
       ]);
 
     const recommendations = {
@@ -226,27 +228,27 @@ export const getAllRecommendations = asyncHandler(async (req, res) => {
       new ApiResponse(
         200,
         recommendations,
-        "All offer recommendations fetched successfully"
-      )
+        "All basket recommendations fetched successfully",
+      ),
     );
   } catch (error) {
     console.error("Error fetching all recommendations:", error);
     return res
       .status(500)
       .json(
-        new ApiResponse(500, null, "Failed to fetch offer recommendations")
+        new ApiResponse(500, null, "Failed to fetch basket recommendations"),
       );
   }
 });
 
 // Internal helper functions (no response, just return data)
-const getMostSellingoffersInternal = async (limit, category) => {
+const getMostSellingBasketsInternal = async (limit, category) => {
   const matchCriteria = { isActive: true };
   if (category) matchCriteria.category = category;
 
-  const offers = await Order.aggregate([
+  const baskets = await Order.aggregate([
     { $unwind: "$items" },
-    { $match: { "items.itemType": "offer" } },
+    { $match: { "items.itemType": "basket" } },
     {
       $group: {
         _id: "$items.itemId",
@@ -257,63 +259,61 @@ const getMostSellingoffersInternal = async (limit, category) => {
     { $limit: limit },
     {
       $lookup: {
-        from: "offers",
+        from: "baskets",
         localField: "_id",
         foreignField: "_id",
-        as: "offerDetails",
+        as: "basketDetails",
       },
     },
-    { $unwind: "$offerDetails" },
+    { $unwind: "$basketDetails" },
     { $match: matchCriteria },
     {
       $project: {
-        _id: "$offerDetails._id",
-        name: "$offerDetails.name",
-        price: "$offerDetails.price",
-        totalPrice: "$offerDetails.totalPrice",
-        image: "$offerDetails.image",
-        items: "$offerDetails.items",
+        _id: "$basketDetails._id",
+        name: "$basketDetails.name",
+        price: "$basketDetails.price",
+        totalPrice: "$basketDetails.totalPrice",
+        image: "$basketDetails.image",
+        items: "$basketDetails.items",
         totalQuantity: 1,
         tag: { $literal: "Most Selling" },
       },
     },
   ]);
 
-  if (offers.length === 0) {
-    const fallback = await offer
-      .find(matchCriteria)
+  if (baskets.length === 0) {
+    const fallback = await Basket.find(matchCriteria)
       .sort({ createdAt: -1 })
       .limit(limit)
       .select("name price totalPrice image items");
     return fallback.map((b) => ({ ...b.toObject(), tag: "Popular" }));
   }
 
-  return offers;
+  return baskets;
 };
 
-const getPremiumOffersInternal = async (limit, category) => {
+const getPremiumBasketsInternal = async (limit, category) => {
   const matchCriteria = { isActive: true };
   if (category) matchCriteria.category = category;
   matchCriteria.$or = [{ price: { $gte: 500 } }, { totalPrice: { $gte: 500 } }];
 
-  const offers = await offer
-    .find(matchCriteria)
+  const baskets = await Basket.find(matchCriteria)
     .sort({ totalPrice: -1, price: -1 })
     .limit(limit)
     .select("name price totalPrice image items");
 
-  return offers.map((b) => ({ ...b.toObject(), tag: "Premium" }));
+  return baskets.map((b) => ({ ...b.toObject(), tag: "Premium" }));
 };
 
-const getBestValueOffersInternal = async (limit, category) => {
+const getBestValueBasketsInternal = async (limit, category) => {
   const matchCriteria = { isActive: true };
   if (category) matchCriteria.category = category;
 
-  const offers = await offer
-    .find(matchCriteria)
-    .select("name price totalPrice image items discount");
+  const baskets = await Basket.find(matchCriteria).select(
+    "name price totalPrice image items discount",
+  );
 
-  const withScores = offers.map((b) => ({
+  const withScores = baskets.map((b) => ({
     ...b.toObject(),
     valueScore: calculateValueScore(b.toObject()),
     tag: "Best Value",
