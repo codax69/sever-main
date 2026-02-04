@@ -634,7 +634,6 @@ export const addOrder = asyncHandler(async (req, res) => {
     couponCode,
     deliveryAddressId,
   } = req.body;
-<<<<<<< HEAD
   console.log({
     customerInfo,
     selectedBasket,
@@ -644,9 +643,6 @@ export const addOrder = asyncHandler(async (req, res) => {
     couponCode,
     deliveryAddressId,
   });
-=======
-
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   // Validation
   if (!customerInfo)
     return res
@@ -755,12 +751,6 @@ export const addOrder = asyncHandler(async (req, res) => {
       sendEmail: true,
       emailType: "invoice",
     }).catch(console.error);
-<<<<<<< HEAD
-
-=======
-    
-    // Send admin notification
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
     sendAdminOrderNotification(populated).catch(console.error);
     
     return res.json(new ApiResponse(201, populated, "Order placed with COD"));
@@ -810,7 +800,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     deliveryAddressId,
   } = req.body;
 
-<<<<<<< HEAD
   // ✅ Enhanced logging
   console.log("📥 Verify Payment Request:", {
     razorpay_order_id,
@@ -821,8 +810,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   });
 
   // ============ VALIDATION ============
-=======
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
     return res
       .status(400)
@@ -837,39 +824,27 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     return res.status(400).json(new ApiResponse(400, null, "Missing offer"));
   }
 
-<<<<<<< HEAD
   // ============ VERIFY SIGNATURE ============
-=======
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   const expectedSig = crypto
     .createHmac("sha256", process.env.RAZORPAY_SECRET)
     .update(`${razorpay_order_id}|${razorpay_payment_id}`)
     .digest("hex");
 
   if (expectedSig !== razorpay_signature) {
-<<<<<<< HEAD
     console.error("❌ Invalid signature");
-=======
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Invalid signature"));
   }
-<<<<<<< HEAD
   console.log("✅ Signature verified");
 
   // ============ CHECK DUPLICATE PAYMENT ============
-=======
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   if (await Order.exists({ razorpayPaymentId: razorpay_payment_id })) {
     return res.status(400).json(new ApiResponse(400, null, "Order exists"));
   }
 
-<<<<<<< HEAD
   // ============ PROCESS ORDER DATA ============
   console.log("🔄 Processing order data...");
-=======
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   const processed = await processOrderData(
     customerInfo,
     selectedOffer,
@@ -879,24 +854,16 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   if (processed.error)
     return res.status(400).json(new ApiResponse(400, null, processed.error));
 
-<<<<<<< HEAD
   const { customerId, basketId, processedVegetables } = processed;
   console.log("✅ Order data processed");
 
   // ============ CALCULATE SUBTOTAL ============
-=======
-  const { customerId, offerId, processedVegetables } = processed;
-
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   let subtotal =
     orderType === "basket"
       ? (await Offer.findById(offerId, { price: 1 }).lean()).price
       : processedVegetables.reduce((sum, i) => sum + i.subtotal, 0);
 
-<<<<<<< HEAD
   // ============ VALIDATE COUPON ============
-=======
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   let couponId = null,
     couponDiscount = 0,
     validatedCode = null;
@@ -906,7 +873,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       couponId = v.couponId;
       couponDiscount = v.couponDiscount;
       validatedCode = v.validatedCouponCode;
-<<<<<<< HEAD
       console.log("✅ Coupon validated:", validatedCode);
     } catch (err) {
       console.warn("⚠️ Coupon validation failed:", err.message);
@@ -914,13 +880,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   }
 
   // ============ CALCULATE TOTALS ============
-=======
-    } catch (err) {
-      console.error("Coupon error:", err.message);
-    }
-  }
-
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   const totals = calculateOrderTotal(
     processedVegetables,
     orderType === "basket"
@@ -930,24 +889,17 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     couponDiscount,
   );
 
-<<<<<<< HEAD
   // ============ UPDATE STOCK ============
   let stockUpdates;
   try {
     stockUpdates = await updateStock(processedVegetables, "deduct");
     console.log("✅ Stock updated:", stockUpdates.length, "items");
-=======
-  let stockUpdates;
-  try {
-    stockUpdates = await updateStock(processedVegetables, "deduct");
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   } catch (err) {
     return res
       .status(500)
       .json(new ApiResponse(500, null, "Stock unavailable"));
   }
 
-<<<<<<< HEAD
   // ============ CREATE ORDER ============
   let result;
   try {
@@ -956,11 +908,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     // ✅ Prepare complete order data
     const orderData = {
       orderId, // ✅ Use orderId from frontend (from Razorpay receipt)
-=======
-  let result;
-  try {
-    result = await createOrderWithRetry({
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
       orderType,
       customerInfo: customerId,
       selectedVegetables: processedVegetables,
@@ -968,10 +915,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       couponCode: validatedCode,
       couponId,
       ...totals,
-<<<<<<< HEAD
-=======
-      orderId,
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
       paymentMethod: "ONLINE",
       orderStatus: "placed",
       paymentStatus: "completed",
@@ -979,7 +922,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       razorpayPaymentId: razorpay_payment_id,
       stockUpdates,
       deliveryAddressId,
-<<<<<<< HEAD
       ...(orderType === "basket" && { selectedBasket: basketId }),
     };
 
@@ -1036,20 +978,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   }
 
   // ============ POPULATE ORDER DETAILS ============
-=======
-      ...(orderType === "basket" && { selectedOffer: offerId }),
-    });
-  } catch (err) {
-    await updateStock(processedVegetables, "restore");
-    return res.status(500).json(new ApiResponse(500, null, err.message));
-  }
-
-  if (couponId) await incrementCouponUsage(couponId, customerId);
-  await User.findByIdAndUpdate(customerId, {
-    $push: { orders: result.order._id },
-  });
-
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   const populated = await Order.findById(result.order._id)
     .populate("customerInfo", "name email phone")
     .populate("deliveryAddressId")
@@ -1057,7 +985,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     .populate("selectedVegetables.vegetable", "name")
     .lean();
 
-<<<<<<< HEAD
   console.log("✅ Order populated");
 
   // ============ SEND NOTIFICATIONS (ASYNC) ============
@@ -1073,16 +1000,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   });
 
   console.log("🎉 Payment verification completed successfully");
-=======
-  processOrderInvoice(populated._id, {
-    sendEmail: true,
-    emailType: "invoice",
-  }).catch(console.error);
-  
-  // Send admin notification
-  sendAdminOrderNotification(populated).catch(console.error);
-  
->>>>>>> parent of edbe6bb (feat: Implement wallet, order, and basket management features, including API response utilities and authentication middleware.)
   res.json(new ApiResponse(200, populated, "Payment verified"));
 });
 
