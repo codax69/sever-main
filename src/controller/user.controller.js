@@ -97,7 +97,7 @@ export const getOrderHistory = asyncHandler(async (req, res) => {
     [orders, totalCount] = await Promise.all([
       Order.find(query)
         .populate("selectedVegetables.vegetable", "name image")
-        .populate("selectedBasket", "name price")
+        .populate("selectedOffer", "name price")
         .sort(sort)
         .skip((page - 1) * parseInt(limit))
         .limit(parseInt(limit))
@@ -109,7 +109,7 @@ export const getOrderHistory = asyncHandler(async (req, res) => {
   } else {
     orders = await Order.find(query)
       .populate("selectedVegetables.vegetable", "name image")
-      .populate("selectedBasket", "name price")
+      .populate("selectedOffer", "name price")
       .sort(sort)
       .skip((page - 1) * parseInt(limit))
       .limit(parseInt(limit))
@@ -160,7 +160,7 @@ export const getUserOrderHistory = asyncHandler(async (req, res) => {
   const orders = await Order.find({ _id: { $in: user.orders || [] } }, null, {
     lean: true,
   })
-    .populate("selectedBasket", "name price")
+    .populate("selectedOffer", "name price")
     .populate("selectedVegetables.vegetable", "name image")
     .sort({ orderDate: -1 })
     .skip(skip)
