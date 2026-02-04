@@ -531,8 +531,7 @@ const createOrderWithRetry = async (
 ) => {
   for (let i = 0; i < maxRetries; i++) {
     try {
-      // ✅ Use provided orderId if exists, otherwise generate new one
-      const orderId = data.orderId || (await generateUniqueOrderId());
+      const orderId = await generateUniqueOrderId();
       const order = await Order.create({ ...data, orderId });
       return { order, orderId };
     } catch (err) {
@@ -540,13 +539,6 @@ const createOrderWithRetry = async (
         await new Promise((r) => setTimeout(r, 50 << i));
         continue;
       }
-      // ✅ Enhanced error logging
-      console.error("❌ Order creation error:", {
-        code: err.code,
-        message: err.message,
-        errors: err.errors,
-        name: err.name,
-      });
       throw err;
     }
   }
@@ -634,15 +626,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     couponCode,
     deliveryAddressId,
   } = req.body;
-  console.log({
-    customerInfo,
-    selectedBasket,
-    selectedVegetables,
-    paymentMethod,
-    orderType,
-    couponCode,
-    deliveryAddressId,
-  });
+
   // Validation
   if (!customerInfo)
     return res
@@ -700,6 +684,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     orderType,
     couponDiscount,
   );
+
   if (paymentMethod === "COD") {
     let stockUpdates;
     try {
@@ -710,11 +695,7 @@ export const addOrder = asyncHandler(async (req, res) => {
 
     let result;
     try {
-      // ✅ Pass orderId explicitly in the data object
-      const orderId = await generateUniqueOrderId();
-
       result = await createOrderWithRetry({
-        orderId, // ✅ Explicitly pass orderId
         orderType,
         customerInfo: customerId,
         selectedVegetables: processedVegetables,
@@ -730,7 +711,6 @@ export const addOrder = asyncHandler(async (req, res) => {
         ...(orderType === "basket" && { selectedOffer: offerId }),
       });
     } catch (err) {
-      console.error("❌ COD Order creation failed:", err);
       await updateStock(processedVegetables, "restore");
       return res.status(500).json(new ApiResponse(500, null, err.message));
     }
@@ -751,6 +731,8 @@ export const addOrder = asyncHandler(async (req, res) => {
       sendEmail: true,
       emailType: "invoice",
     }).catch(console.error);
+    
+    // Send admin notification
     sendAdminOrderNotification(populated).catch(console.error);
     
     return res.json(new ApiResponse(201, populated, "Order placed with COD"));
@@ -794,22 +776,12 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     customerInfo,
     selectedOffer,
     selectedVegetables,
-    orderId, // ✅ This comes from frontend
+    orderId,
     orderType,
     couponCode,
     deliveryAddressId,
   } = req.body;
 
-  // ✅ Enhanced logging
-  console.log("📥 Verify Payment Request:", {
-    razorpay_order_id,
-    razorpay_payment_id,
-    orderId,
-    orderType,
-    vegetablesCount: selectedVegetables?.length,
-  });
-
-  // ============ VALIDATION ============
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
     return res
       .status(400)
@@ -824,27 +796,20 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     return res.status(400).json(new ApiResponse(400, null, "Missing offer"));
   }
 
-  // ============ VERIFY SIGNATURE ============
   const expectedSig = crypto
     .createHmac("sha256", process.env.RAZORPAY_SECRET)
     .update(`${razorpay_order_id}|${razorpay_payment_id}`)
     .digest("hex");
 
   if (expectedSig !== razorpay_signature) {
-    console.error("❌ Invalid signature");
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Invalid signature"));
   }
-  console.log("✅ Signature verified");
-
-  // ============ CHECK DUPLICATE PAYMENT ============
   if (await Order.exists({ razorpayPaymentId: razorpay_payment_id })) {
     return res.status(400).json(new ApiResponse(400, null, "Order exists"));
   }
 
-  // ============ PROCESS ORDER DATA ============
-  console.log("🔄 Processing order data...");
   const processed = await processOrderData(
     customerInfo,
     selectedOffer,
@@ -854,16 +819,13 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   if (processed.error)
     return res.status(400).json(new ApiResponse(400, null, processed.error));
 
-  const { customerId, basketId, processedVegetables } = processed;
-  console.log("✅ Order data processed");
+  const { customerId, offerId, processedVegetables } = processed;
 
-  // ============ CALCULATE SUBTOTAL ============
   let subtotal =
     orderType === "basket"
       ? (await Offer.findById(offerId, { price: 1 }).lean()).price
       : processedVegetables.reduce((sum, i) => sum + i.subtotal, 0);
 
-  // ============ VALIDATE COUPON ============
   let couponId = null,
     couponDiscount = 0,
     validatedCode = null;
@@ -873,13 +835,11 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       couponId = v.couponId;
       couponDiscount = v.couponDiscount;
       validatedCode = v.validatedCouponCode;
-      console.log("✅ Coupon validated:", validatedCode);
     } catch (err) {
-      console.warn("⚠️ Coupon validation failed:", err.message);
+      console.error("Coupon error:", err.message);
     }
   }
 
-  // ============ CALCULATE TOTALS ============
   const totals = calculateOrderTotal(
     processedVegetables,
     orderType === "basket"
@@ -889,25 +849,18 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     couponDiscount,
   );
 
-  // ============ UPDATE STOCK ============
   let stockUpdates;
   try {
     stockUpdates = await updateStock(processedVegetables, "deduct");
-    console.log("✅ Stock updated:", stockUpdates.length, "items");
   } catch (err) {
     return res
       .status(500)
       .json(new ApiResponse(500, null, "Stock unavailable"));
   }
 
-  // ============ CREATE ORDER ============
   let result;
   try {
-    console.log("💾 Creating order with orderId:", orderId);
-
-    // ✅ Prepare complete order data
-    const orderData = {
-      orderId, // ✅ Use orderId from frontend (from Razorpay receipt)
+    result = await createOrderWithRetry({
       orderType,
       customerInfo: customerId,
       selectedVegetables: processedVegetables,
@@ -915,6 +868,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       couponCode: validatedCode,
       couponId,
       ...totals,
+      orderId,
       paymentMethod: "ONLINE",
       orderStatus: "placed",
       paymentStatus: "completed",
@@ -922,62 +876,18 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       razorpayPaymentId: razorpay_payment_id,
       stockUpdates,
       deliveryAddressId,
-      ...(orderType === "basket" && { selectedBasket: basketId }),
-    };
-
-    // ✅ Debug log before creation
-    console.log("📋 Order data prepared:", {
-      orderId: orderData.orderId,
-      customerInfo: orderData.customerInfo,
-      totalAmount: orderData.totalAmount,
-      vegetablesCount: orderData.selectedVegetables.length,
-    });
-
-    result = await createOrderWithRetry(orderData);
-
-    console.log("✅ Order created:", {
-      orderId: result.orderId,
-      dbId: result.order._id,
+      ...(orderType === "basket" && { selectedOffer: offerId }),
     });
   } catch (err) {
-    console.error("❌ Order creation failed:", {
-      name: err.name,
-      message: err.message,
-      code: err.code,
-      errors: err.errors,
-    });
-
-    // Restore stock on failure
-    try {
-      await updateStock(processedVegetables, "restore");
-      console.log("✅ Stock restored after failed order creation");
-    } catch (restoreErr) {
-      console.error("❌ Failed to restore stock:", restoreErr.message);
-    }
-
+    await updateStock(processedVegetables, "restore");
     return res.status(500).json(new ApiResponse(500, null, err.message));
   }
 
-  // ============ POST-ORDER UPDATES ============
-  if (couponId) {
-    try {
-      await incrementCouponUsage(couponId, customerId);
-      console.log("✅ Coupon usage incremented");
-    } catch (err) {
-      console.error("⚠️ Failed to increment coupon usage:", err.message);
-    }
-  }
+  if (couponId) await incrementCouponUsage(couponId, customerId);
+  await User.findByIdAndUpdate(customerId, {
+    $push: { orders: result.order._id },
+  });
 
-  try {
-    await User.findByIdAndUpdate(customerId, {
-      $push: { orders: result.order._id },
-    });
-    console.log("✅ User orders updated");
-  } catch (err) {
-    console.error("⚠️ Failed to update user orders:", err.message);
-  }
-
-  // ============ POPULATE ORDER DETAILS ============
   const populated = await Order.findById(result.order._id)
     .populate("customerInfo", "name email phone")
     .populate("deliveryAddressId")
@@ -985,21 +895,14 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     .populate("selectedVegetables.vegetable", "name")
     .lean();
 
-  console.log("✅ Order populated");
-
-  // ============ SEND NOTIFICATIONS (ASYNC) ============
   processOrderInvoice(populated._id, {
     sendEmail: true,
     emailType: "invoice",
-  }).catch((err) => {
-    console.error("⚠️ Invoice email failed:", err.message);
-  });
-
-  sendAdminOrderNotification(populated).catch((err) => {
-    console.error("⚠️ Admin notification failed:", err.message);
-  });
-
-  console.log("🎉 Payment verification completed successfully");
+  }).catch(console.error);
+  
+  // Send admin notification
+  sendAdminOrderNotification(populated).catch(console.error);
+  
   res.json(new ApiResponse(200, populated, "Payment verified"));
 });
 
