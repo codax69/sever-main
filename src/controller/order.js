@@ -976,7 +976,7 @@ export const addOrder = asyncHandler(async (req, res) => {
 
     try {
       // 1. Update stock (SKIPPED FOR DEBUG)
-      // stockUpdates = await updateStock(processedVegetables, "deduct");
+      stockUpdates = await updateStock(processedVegetables, "deduct");
 
       // 2. Generate order ID and create order
       const orderId = await generateUniqueOrderId();
@@ -1022,9 +1022,11 @@ export const addOrder = asyncHandler(async (req, res) => {
       });
 
       // 3. Debit wallet (SKIPPED FOR DEBUG)
-      /*
+
       const referenceId = result.orderId;
       const description = `Payment for order ${result.orderId}`;
+      const session = await mongoose.startSession();
+      session.startTransaction();
 
       await WalletTransaction.createDebitTransaction(
         wallet._id,
@@ -1034,7 +1036,9 @@ export const addOrder = asyncHandler(async (req, res) => {
         description,
         session,
       );
-      */
+
+      await session.commitTransaction();
+      session.endSession();
 
       // 4. Increment coupon usage if applicable
       if (couponId) {

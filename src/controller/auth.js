@@ -470,11 +470,14 @@ export const forgotPassword = asyncHandler(async (req, res) => {
 
 // UPDATE THE EXISTING adminRegister FUNCTION:
 export const adminRegister = asyncHandler(async (req, res) => {
-  const { username, email, password, phone,  } = req.body;
+  const { username, email, password, phone } = req.body;
 
-  // if (adminSecretKey !== process.env.ADMIN_SECRET_KEY) {
-  //   throw new ApiError(403, "Invalid admin registration key");
-  // }
+  if (
+    process.env.ADMIN_SECRET_KEY &&
+    req.body.adminSecretKey !== process.env.ADMIN_SECRET_KEY
+  ) {
+    throw new ApiError(403, "Invalid admin registration key");
+  }
 
   if (!username || !email || !password) {
     throw new ApiError(400, "Username, email, and password are required");
@@ -773,7 +776,10 @@ export const updateUserDetails = asyncHandler(async (req, res) => {
   const { username, email, phone } = req.body;
 
   if (!username && !email && !phone) {
-    throw new ApiError(400, "At least one field (username, email, or phone) is required");
+    throw new ApiError(
+      400,
+      "At least one field (username, email, or phone) is required",
+    );
   }
 
   const updateData = {};
@@ -793,10 +799,12 @@ export const updateUserDetails = asyncHandler(async (req, res) => {
     }
 
     // Check if email is already in use by another user
-    const existingUser = await User.findOne({ 
-      email: email.toLowerCase(), 
-      _id: { $ne: userId } 
-    }).lean().select("_id");
+    const existingUser = await User.findOne({
+      email: email.toLowerCase(),
+      _id: { $ne: userId },
+    })
+      .lean()
+      .select("_id");
 
     if (existingUser) {
       throw new ApiError(400, "Email is already in use");
