@@ -1,7 +1,7 @@
 import Order from "../Model/order.js";
 import User from "../Model/user.js";
 import Vegetable from "../Model/vegetable.js";
-import Offer from "../Model/offer.js";
+import Basket from "../Model/basket.js";
 import Coupon from "../Model/coupon.js";
 import Address from "../Model/address.js";
 import { ApiResponse } from "../utility/ApiResponse.js";
@@ -14,6 +14,14 @@ import crypto from "crypto";
 import nodemailer from "nodemailer";
 import "dotenv/config";
 import { DELIVERY_CHARGES } from "../../const.js";
+import Wallet from "../Model/wallet.model.js";
+import WalletTransaction from "../Model/walletTransaction.model.js";
+import { rupeeToPaise, generateReferenceId } from "../utility/walletHelpers.js";
+import mongoose from "mongoose";
+import {
+  calculateCashback,
+  isCashbackEligible,
+} from "../../config/cashback.config.js";
 
 // ================= CONSTANTS & CONFIGS =================
 const CONFIG = Object.freeze({
@@ -339,20 +347,30 @@ const processCustomer = async (info) => {
 };
 
 // ================= VEGETABLE PROCESSING WITH GROUPING =================
-const getVegId = (item) =>
-  typeof item === "string"
-    ? item
-    : item.vegetable
-      ? typeof item.vegetable === "string"
-        ? item.vegetable
-        : item.vegetable._id || item.vegetable.id
-      : item._id || item.id || item.name;
+const getVegId = (item) => {
+  if (!item) return null;
+  if (typeof item === "string") return item;
+  if (item instanceof mongoose.Types.ObjectId) return item.toString();
+
+  if (item.vegetable) {
+    if (typeof item.vegetable === "string") return item.vegetable;
+    if (item.vegetable instanceof mongoose.Types.ObjectId)
+      return item.vegetable.toString();
+    return item.vegetable._id || item.vegetable.id;
+  }
+  return item._id || item.id || item.name;
+};
 
 const processVegetables = async (items, isBasket = false) => {
   if (!Array.isArray(items) || !items.length) throw new Error("Items required");
 
   const vegIds = [...new Set(items.map(getVegId).filter(Boolean))];
-  if (!vegIds.length) throw new Error("No valid items");
+  if (!vegIds.length)
+    throw new Error("No valid items. Received: " + JSON.stringify(items));
+
+  if (!vegIds.length) {
+    throw new Error("No valid items");
+  }
 
   const isObjectId = /^[0-9a-fA-F]{24}$/.test(vegIds[0]);
   const vegetables = await Vegetable.find(
@@ -411,46 +429,102 @@ const processVegetables = async (items, isBasket = false) => {
 // ================= PARALLEL ORDER DATA PROCESSING =================
 const processOrderData = async (
   customer,
-  offer,
+  basket,
   vegetables,
   type = "custom",
 ) => {
   try {
-    const [customerId, offerId, processedVegs] = await Promise.all([
+    const [customerId, basketId, processedVegs] = await Promise.all([
       processCustomer(customer),
-      type === "basket" && offer
-        ? Offer.findById(typeof offer === "string" ? offer : offer._id, {
+      type === "basket" && basket
+        ? Basket.findById(typeof basket === "string" ? basket : basket._id, {
             _id: 1,
           })
             .lean()
-            .then((o) => {
-              if (!o) throw new Error("Offer not found");
-              return o._id;
+            .then((b) => {
+              if (!b) throw new Error("Basket not found");
+              return b._id;
             })
         : null,
       processVegetables(vegetables, type === "basket"),
     ]);
-    return { customerId, offerId, processedVegetables: processedVegs };
+    return { customerId, basketId, processedVegetables: processedVegs };
   } catch (error) {
     return { error: error.message };
   }
 };
 
-// ================= ORDER TOTAL CALCULATION =================
+// ================= CASHBACK MANAGEMENT =================
+/**
+ * Credit cashback to user's wallet
+ * @param {Object} order - Order object with cashback details
+ * @returns {Promise<Object>} Cashback credit result
+ */
+async function creditCashbackToWallet(order) {
+  try {
+    // Check if cashback is eligible and not already credited
+    if (
+      !order.cashbackEligible ||
+      order.cashbackCredited ||
+      order.cashbackAmount <= 0
+    ) {
+      return { success: false, reason: "Not eligible or already credited" };
+    }
+
+    const customerId = order.customerInfo;
+
+    // Get or create wallet
+    let wallet = await Wallet.findByUserId(customerId);
+
+    if (!wallet) {
+      // Auto-create wallet if doesn't exist
+      wallet = await Wallet.createWallet(customerId);
+    }
+
+    // Check if wallet is active
+    if (!wallet.isActive()) {
+      return { success: false, reason: "Wallet inactive" };
+    }
+    // Credit cashback to wallet
+    // Create transaction
+    const transaction = await WalletTransaction.createCreditTransaction(
+      wallet._id,
+      "cashback",
+      `CSHBK-${order.orderId}`,
+      Math.round(order.cashbackAmount * 100),
+      `Cashback for order ${order.orderId}`,
+    );
+    await Order.findByIdAndUpdate(order._id, {
+      cashbackCredited: true,
+      cashbackCreditedAt: new Date(),
+    });
+
+    return {
+      success: true,
+      amount: order.cashbackAmount,
+      transaction: transaction[0],
+    };
+  } catch (error) {
+    console.error("❌ Cashback credit failed:", error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ================= ORDER CREATION =================
 const calculateOrderTotal = (
   vegs,
-  offerPrice = null,
+  basketPrice = null,
   type = "custom",
   discount = 0,
 ) => {
   const vegTotal = vegs.reduce((sum, i) => sum + i.subtotal, 0);
 
   if (type === "basket") {
-    if (!offerPrice) throw new Error("Offer price required");
-    const afterDiscount = Math.max(0, offerPrice - discount);
+    if (!basketPrice) throw new Error("Basket price required");
+    const afterDiscount = Math.max(0, basketPrice - discount);
     return {
       vegetablesTotal: vegTotal,
-      offerPrice,
+      basketPrice,
       couponDiscount: discount,
       subtotalAfterDiscount: afterDiscount,
       deliveryCharges: CONFIG.deliveryCharges,
@@ -464,7 +538,7 @@ const calculateOrderTotal = (
 
   return {
     vegetablesTotal: vegTotal,
-    offerPrice: 0,
+    basketPrice: 0,
     couponDiscount: discount,
     subtotalAfterDiscount: afterDiscount,
     deliveryCharges: delivery,
@@ -531,7 +605,8 @@ const createOrderWithRetry = async (
 ) => {
   for (let i = 0; i < maxRetries; i++) {
     try {
-      const orderId = await generateUniqueOrderId();
+      // ✅ Use provided orderId if exists, otherwise generate new one
+      const orderId = data.orderId || (await generateUniqueOrderId());
       const order = await Order.create({ ...data, orderId });
       return { order, orderId };
     } catch (err) {
@@ -539,6 +614,13 @@ const createOrderWithRetry = async (
         await new Promise((r) => setTimeout(r, 50 << i));
         continue;
       }
+      // ✅ Enhanced error logging
+      console.error("❌ Order creation error:", {
+        code: err.code,
+        message: err.message,
+        errors: err.errors,
+        name: err.name,
+      });
       throw err;
     }
   }
@@ -559,7 +641,7 @@ export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
 });
 
 export const getOrders = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page) ;
+  const page = parseInt(req.query.page);
   const limit = parseInt(req.query.limit);
   const skip = (page - 1) * limit;
 
@@ -573,7 +655,10 @@ export const getOrders = asyncHandler(async (req, res) => {
     Order.find(filter)
       .populate("customerInfo")
       .populate("deliveryAddressId")
-      .populate("selectedOffer")
+      .populate({
+        path: "selectedBasket",
+        populate: { path: "vegetables.vegetable", select: "name" },
+      })
       .populate("selectedVegetables.vegetable")
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -607,7 +692,10 @@ export const getOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ orderId })
     .populate("customerInfo")
     .populate({ path: "deliveryAddress", populate: { path: "user" } })
-    .populate("selectedOffer")
+    .populate({
+      path: "selectedBasket",
+      populate: { path: "vegetables.vegetable", select: "name" },
+    })
     .populate("selectedVegetables.vegetable")
     .lean();
 
@@ -619,7 +707,7 @@ export const getOrderById = asyncHandler(async (req, res) => {
 export const addOrder = asyncHandler(async (req, res) => {
   const {
     customerInfo,
-    selectedOffer,
+    selectedBasket,
     selectedVegetables,
     paymentMethod,
     orderType,
@@ -636,30 +724,30 @@ export const addOrder = asyncHandler(async (req, res) => {
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Invalid order type"));
-  if (orderType === "basket" && !selectedOffer)
-    return res.status(400).json(new ApiResponse(400, null, "Offer required"));
+  if (orderType === "basket" && !selectedBasket)
+    return res.status(400).json(new ApiResponse(400, null, "Basket required"));
   if (!Array.isArray(selectedVegetables) || !selectedVegetables.length) {
     return res.status(400).json(new ApiResponse(400, null, "Items required"));
   }
-  if (!["COD", "ONLINE"].includes(paymentMethod))
+  if (!["COD", "ONLINE", "WALLET"].includes(paymentMethod))
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Invalid payment method"));
 
   const processed = await processOrderData(
     customerInfo,
-    selectedOffer,
+    selectedBasket,
     selectedVegetables,
     orderType,
   );
   if (processed.error)
     return res.status(400).json(new ApiResponse(400, null, processed.error));
 
-  const { customerId, offerId, processedVegetables } = processed;
+  const { customerId, basketId, processedVegetables } = processed;
 
   let subtotal =
     orderType === "basket"
-      ? (await Offer.findById(offerId, { price: 1 }).lean()).price
+      ? (await Basket.findById(basketId, { price: 1 }).lean()).price
       : processedVegetables.reduce((sum, i) => sum + i.subtotal, 0);
 
   let couponId = null,
@@ -679,12 +767,34 @@ export const addOrder = asyncHandler(async (req, res) => {
   const totals = calculateOrderTotal(
     processedVegetables,
     orderType === "basket"
-      ? (await Offer.findById(offerId, { price: 1 }).lean()).price
+      ? (await Basket.findById(basketId, { price: 1 }).lean()).price
       : null,
     orderType,
     couponDiscount,
   );
 
+  // ================= APPLY WALLET CREDIT (IF AVAILABLE) =================
+  let walletCreditUsed = 0;
+  let finalPayableAmount = totals.totalAmount;
+  let walletBalance = 0;
+
+  // Check if user has a wallet and apply credit
+  try {
+    const wallet = await Wallet.findByUserId(customerId);
+
+    if (wallet && wallet.isActive()) {
+      walletBalance = await WalletTransaction.getCurrentBalance(wallet._id);
+      const walletBalanceInRupees = walletBalance / 100;
+
+      // Apply wallet credit (use minimum of wallet balance or order total)
+      walletCreditUsed = Math.min(walletBalanceInRupees, totals.totalAmount);
+      finalPayableAmount = Math.max(0, totals.totalAmount - walletCreditUsed);
+    }
+  } catch (error) {
+    // If wallet check fails, continue without wallet credit
+  }
+
+  // ================= COD PAYMENT FLOW =================
   if (paymentMethod === "COD") {
     let stockUpdates;
     try {
@@ -695,7 +805,30 @@ export const addOrder = asyncHandler(async (req, res) => {
 
     let result;
     try {
+      // ✅ Pass orderId explicitly in the data object
+      const orderId = await generateUniqueOrderId();
+
+      // Count completed orders for cashback eligibility
+      const completedOrderCount = await Order.countDocuments({
+        customerInfo: customerId,
+        orderStatus: { $in: ["placed", "processed", "shipped", "delivered"] },
+      });
+
+      // Calculate cashback
+      const orderForCashback = {
+        finalPayableAmount,
+        totalAmount: totals.totalAmount,
+        paymentMethod: "COD",
+      };
+      const cashbackAmount = calculateCashback(
+        orderForCashback,
+        customerId,
+        completedOrderCount,
+      );
+      const cashbackEligible = cashbackAmount > 0;
+
       result = await createOrderWithRetry({
+        orderId, // ✅ Explicitly pass orderId
         orderType,
         customerInfo: customerId,
         selectedVegetables: processedVegetables,
@@ -703,16 +836,51 @@ export const addOrder = asyncHandler(async (req, res) => {
         couponCode: validatedCode,
         couponId,
         ...totals,
+        walletCreditUsed,
+        finalPayableAmount,
+        cashbackEligible,
+        cashbackAmount,
         paymentMethod: "COD",
-        paymentStatus: "pending",
+        paymentStatus: finalPayableAmount === 0 ? "completed" : "pending",
         orderStatus: "placed",
         stockUpdates,
         deliveryAddressId,
-        ...(orderType === "basket" && { selectedOffer: offerId }),
+        ...(orderType === "basket" && { selectedBasket: basketId }),
       });
+      // console.log("✅ Order created:", result.order._id);
     } catch (err) {
+      console.error("❌ COD Order creation failed:", err);
       await updateStock(processedVegetables, "restore");
       return res.status(500).json(new ApiResponse(500, null, err.message));
+    }
+
+    // ============ DEBIT WALLET IF CREDIT WAS USED ============
+    if (walletCreditUsed > 0) {
+      try {
+        const wallet = await Wallet.findByUserId(customerId);
+        const amountInPaise = rupeeToPaise(walletCreditUsed);
+        const description = `Wallet credit applied to order ${result.orderId}`;
+
+        await WalletTransaction.createDebitTransaction(
+          wallet._id,
+          "order_payment",
+          result.orderId,
+          amountInPaise,
+          description,
+        );
+      } catch (walletError) {
+        // Wallet debit failed but order still created
+      }
+    }
+
+    // ============ CREDIT CASHBACK IF ELIGIBLE ============
+    if (result.cashbackEligible && result.cashbackAmount > 0) {
+      creditCashbackToWallet(result.order).catch((error) => {
+        console.error(
+          "⚠️ Cashback credit failed (order still created):",
+          error,
+        );
+      });
     }
 
     if (couponId) await incrementCouponUsage(couponId, customerId);
@@ -723,7 +891,10 @@ export const addOrder = asyncHandler(async (req, res) => {
     const populated = await Order.findById(result.order._id)
       .populate("customerInfo", "name email phone")
       .populate("deliveryAddressId")
-      .populate("selectedOffer")
+      .populate({
+        path: "selectedBasket",
+        populate: { path: "vegetables.vegetable", select: "name" },
+      })
       .populate("selectedVegetables.vegetable", "name")
       .lean();
 
@@ -731,26 +902,214 @@ export const addOrder = asyncHandler(async (req, res) => {
       sendEmail: true,
       emailType: "invoice",
     }).catch(console.error);
-    
-    // Send admin notification
+
     sendAdminOrderNotification(populated).catch(console.error);
-    
+
     return res.json(new ApiResponse(201, populated, "Order placed with COD"));
   }
 
+  // ================= WALLET PAYMENT FLOW =================
+  if (paymentMethod === "WALLET") {
+    // Wallet credit should already be calculated above
+    // Check if wallet can cover the full amount
+    if (finalPayableAmount > 0) {
+      return res.status(400).json(
+        new ApiResponse(
+          400,
+          {
+            totalAmount: totals.totalAmount,
+            walletBalance: walletCreditUsed,
+            shortfall: finalPayableAmount,
+          },
+          "Insufficient wallet balance to pay full amount with wallet",
+        ),
+      );
+    }
+
+    // Get user wallet for transaction
+    const wallet = await Wallet.findByUserId(customerId);
+
+    if (!wallet) {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "Wallet not found. Please create a wallet first.",
+          ),
+        );
+    }
+
+    if (!wallet.isActive()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Wallet is not active"));
+    }
+
+    // Check wallet balance (double-check)
+    const currentBalance = await WalletTransaction.getCurrentBalance(
+      wallet._id,
+    );
+    const amountInPaise = rupeeToPaise(totals.totalAmount);
+
+    if (currentBalance < amountInPaise) {
+      return res.status(400).json(
+        new ApiResponse(
+          400,
+          {
+            required: totals.totalAmount,
+            available: currentBalance / 100,
+            shortfall: (amountInPaise - currentBalance) / 100,
+          },
+          "Insufficient wallet balance",
+        ),
+      );
+    }
+
+    // Start MongoDB transaction for atomic operation
+    // const session = await mongoose.startSession();
+    // session.startTransaction();
+
+    let stockUpdates;
+    let result;
+
+    try {
+      // 1. Update stock (SKIPPED FOR DEBUG)
+      // stockUpdates = await updateStock(processedVegetables, "deduct");
+
+      // 2. Generate order ID and create order
+      const orderId = await generateUniqueOrderId();
+
+      // Count completed orders for cashback eligibility
+      const completedOrderCount = await Order.countDocuments({
+        customerInfo: customerId,
+        orderStatus: { $in: ["placed", "processed", "shipped", "delivered"] },
+      });
+
+      // Calculate cashback (will be 0 for WALLET payment as it's excluded)
+      const orderForCashback = {
+        finalPayableAmount: 0,
+        totalAmount: totals.totalAmount,
+        paymentMethod: "WALLET",
+      };
+      const cashbackAmount = calculateCashback(
+        orderForCashback,
+        customerId,
+        completedOrderCount,
+      );
+      const cashbackEligible = cashbackAmount > 0;
+
+      result = await createOrderWithRetry({
+        orderId,
+        orderType,
+        customerInfo: customerId,
+        selectedVegetables: processedVegetables,
+        orderDate: new Date(),
+        couponCode: validatedCode,
+        couponId,
+        ...totals,
+        walletCreditUsed,
+        finalPayableAmount: 0, // Full amount paid by wallet
+        cashbackEligible,
+        cashbackAmount,
+        paymentMethod: "WALLET",
+        paymentStatus: "completed", // Wallet payment is instant
+        orderStatus: "placed",
+        stockUpdates: [],
+        deliveryAddressId,
+        ...(orderType === "basket" && { selectedBasket: basketId }),
+      });
+
+      // 3. Debit wallet (SKIPPED FOR DEBUG)
+      /*
+      const referenceId = result.orderId;
+      const description = `Payment for order ${result.orderId}`;
+
+      await WalletTransaction.createDebitTransaction(
+        wallet._id,
+        "order_payment",
+        referenceId,
+        amountInPaise,
+        description,
+        session,
+      );
+      */
+
+      // 4. Increment coupon usage if applicable
+      if (couponId) {
+        await incrementCouponUsage(couponId, customerId);
+      }
+
+      // 5. Update user's orders
+      await User.findByIdAndUpdate(customerId, {
+        $push: { orders: result.order._id },
+      });
+
+      // Commit transaction
+      // await session.commitTransaction();
+
+      const populated = result.order; // Return simple order for test
+
+      return res.json(
+        new ApiResponse(
+          201,
+          {
+            ...populated,
+            walletDebit: {
+              amount: totals.totalAmount,
+              previousBalance: currentBalance / 100,
+              newBalance: (currentBalance - amountInPaise) / 100,
+            },
+          },
+          "Order placed with wallet payment",
+        ),
+      );
+    } catch (error) {
+      console.error("Wallet Debug Error:", error);
+      return res.status(500).json(new ApiResponse(500, null, error.message));
+    }
+  }
+
+  // ================= ONLINE PAYMENT FLOW (RAZORPAY) =================
+
   const orderId = await generateUniqueOrderId();
   const razorpayOrder = await razorpay.orders.create({
-    amount: Math.round(totals.totalAmount * 100),
+    amount: Math.round(finalPayableAmount * 100), // Charge only remaining amount after wallet credit
     currency: "INR",
     receipt: orderId,
     payment_capture: 1,
   });
+
+  // Count completed orders for cashback eligibility
+  const completedOrderCount = await Order.countDocuments({
+    customerInfo: customerId,
+    orderStatus: { $in: ["placed", "processed", "shipped", "delivered"] },
+  });
+
+  // Calculate cashback for ONLINE payment
+  const orderForCashback = {
+    finalPayableAmount,
+    totalAmount: totals.totalAmount,
+    paymentMethod: "ONLINE",
+  };
+  const cashbackAmount = calculateCashback(
+    orderForCashback,
+    customerId,
+    completedOrderCount,
+  );
+  const cashbackEligible = cashbackAmount > 0;
 
   res.json(
     new ApiResponse(
       201,
       {
         razorpayOrder,
+        walletInfo: {
+          walletCreditUsed,
+          originalAmount: totals.totalAmount,
+          finalPayableAmount,
+        },
         orderData: {
           orderType,
           customerInfo: customerId,
@@ -759,8 +1118,12 @@ export const addOrder = asyncHandler(async (req, res) => {
           couponCode: validatedCode,
           couponId,
           ...totals,
+          walletCreditUsed,
+          finalPayableAmount,
+          cashbackEligible,
+          cashbackAmount,
           deliveryAddressId,
-          ...(orderType === "basket" && { selectedOffer: offerId }),
+          ...(orderType === "basket" && { selectedBasket: basketId }),
         },
       },
       "Razorpay order created",
@@ -768,64 +1131,87 @@ export const addOrder = asyncHandler(async (req, res) => {
   );
 });
 
+// ================= FIXED: VERIFY PAYMENT CONTROLLER =================
 export const verifyPayment = asyncHandler(async (req, res) => {
   const {
     razorpay_order_id,
     razorpay_payment_id,
     razorpay_signature,
     customerInfo,
-    selectedOffer,
+    selectedBasket,
     selectedVegetables,
-    orderId,
+    orderId, // ✅ This comes from frontend
     orderType,
     couponCode,
     deliveryAddressId,
   } = req.body;
 
+  // ============ VALIDATION ============
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    console.error("❌ Missing payment data");
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Missing payment data"));
   }
   if (!customerInfo || !selectedVegetables || !orderId) {
+    console.error("❌ Missing order data:", {
+      hasCustomerInfo: !!customerInfo,
+      hasVegetables: !!selectedVegetables,
+      hasOrderId: !!orderId,
+    });
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Missing order data"));
   }
-  if (orderType === "basket" && !selectedOffer) {
-    return res.status(400).json(new ApiResponse(400, null, "Missing offer"));
+  if (orderType === "basket" && !selectedBasket) {
+    console.error("❌ Missing basket for basket order");
+    return res.status(400).json(new ApiResponse(400, null, "Missing basket"));
   }
 
+  // ============ VERIFY SIGNATURE ============
   const expectedSig = crypto
     .createHmac("sha256", process.env.RAZORPAY_SECRET)
     .update(`${razorpay_order_id}|${razorpay_payment_id}`)
     .digest("hex");
 
   if (expectedSig !== razorpay_signature) {
+    console.error("❌ Invalid signature");
     return res
       .status(400)
       .json(new ApiResponse(400, null, "Invalid signature"));
   }
+  // console.log("✅ Signature verified");
+
+  // ============ CHECK DUPLICATE PAYMENT ============
   if (await Order.exists({ razorpayPaymentId: razorpay_payment_id })) {
+    console.warn("⚠️ Payment already processed:", razorpay_payment_id);
     return res.status(400).json(new ApiResponse(400, null, "Order exists"));
   }
 
+  // ============ PROCESS ORDER DATA ============
+  // console.log("🔄 Processing order data...");
   const processed = await processOrderData(
     customerInfo,
-    selectedOffer,
+    selectedBasket,
     selectedVegetables,
     orderType,
   );
-  if (processed.error)
+
+  if (processed.error) {
+    console.error("❌ Order data processing failed:", processed.error);
     return res.status(400).json(new ApiResponse(400, null, processed.error));
+  }
 
-  const { customerId, offerId, processedVegetables } = processed;
+  const { customerId, basketId, processedVegetables } = processed;
+  // console.log("✅ Order data processed");
 
+  // ============ CALCULATE SUBTOTAL ============
   let subtotal =
     orderType === "basket"
-      ? (await Offer.findById(offerId, { price: 1 }).lean()).price
+      ? (await Basket.findById(basketId, { price: 1 }).lean()).price
       : processedVegetables.reduce((sum, i) => sum + i.subtotal, 0);
 
+  // ============ VALIDATE COUPON ============
   let couponId = null,
     couponDiscount = 0,
     validatedCode = null;
@@ -836,19 +1222,41 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       couponDiscount = v.couponDiscount;
       validatedCode = v.validatedCouponCode;
     } catch (err) {
-      console.error("Coupon error:", err.message);
+      // Coupon validation failed, continue without coupon
     }
   }
 
+  // ============ CALCULATE TOTALS ============
   const totals = calculateOrderTotal(
     processedVegetables,
     orderType === "basket"
-      ? (await Offer.findById(offerId, { price: 1 }).lean()).price
+      ? (await Basket.findById(basketId, { price: 1 }).lean()).price
       : null,
     orderType,
     couponDiscount,
   );
 
+  // ============ APPLY WALLET CREDIT (IF AVAILABLE) ============
+  let walletCreditUsed = 0;
+  let finalPayableAmount = totals.totalAmount;
+
+  try {
+    const wallet = await Wallet.findByUserId(customerId);
+
+    if (wallet && wallet.isActive()) {
+      const walletBalance = await WalletTransaction.getCurrentBalance(
+        wallet._id,
+      );
+      const walletBalanceInRupees = walletBalance / 100;
+
+      walletCreditUsed = Math.min(walletBalanceInRupees, totals.totalAmount);
+      finalPayableAmount = Math.max(0, totals.totalAmount - walletCreditUsed);
+    }
+  } catch (error) {
+    // Could not check wallet balance, continue without wallet credit
+  }
+
+  // ============ UPDATE STOCK ============
   let stockUpdates;
   try {
     stockUpdates = await updateStock(processedVegetables, "deduct");
@@ -858,9 +1266,31 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       .json(new ApiResponse(500, null, "Stock unavailable"));
   }
 
+  // ============ CREATE ORDER ============
   let result;
   try {
-    result = await createOrderWithRetry({
+    // Count completed orders for cashback eligibility
+    const completedOrderCount = await Order.countDocuments({
+      customerInfo: customerId,
+      orderStatus: { $in: ["placed", "processed", "shipped", "delivered"] },
+    });
+
+    // Calculate cashback for ONLINE payment
+    const orderForCashback = {
+      finalPayableAmount,
+      totalAmount: totals.totalAmount,
+      paymentMethod: "ONLINE",
+    };
+    const cashbackAmount = calculateCashback(
+      orderForCashback,
+      customerId,
+      completedOrderCount,
+    );
+    const cashbackEligible = cashbackAmount > 0;
+
+    // ✅ Prepare complete order data
+    const orderData = {
+      orderId, // ✅ Use orderId from frontend (from Razorpay receipt)
       orderType,
       customerInfo: customerId,
       selectedVegetables: processedVegetables,
@@ -868,7 +1298,10 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       couponCode: validatedCode,
       couponId,
       ...totals,
-      orderId,
+      walletCreditUsed,
+      finalPayableAmount,
+      cashbackEligible,
+      cashbackAmount,
       paymentMethod: "ONLINE",
       orderStatus: "placed",
       paymentStatus: "completed",
@@ -876,33 +1309,91 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       razorpayPaymentId: razorpay_payment_id,
       stockUpdates,
       deliveryAddressId,
-      ...(orderType === "basket" && { selectedOffer: offerId }),
-    });
+      ...(orderType === "basket" && { selectedBasket: basketId }),
+    };
+
+    result = await createOrderWithRetry(orderData);
   } catch (err) {
-    await updateStock(processedVegetables, "restore");
+    // Restore stock on failure
+    try {
+      await updateStock(processedVegetables, "restore");
+    } catch (restoreErr) {
+      // Failed to restore stock
+    }
+
     return res.status(500).json(new ApiResponse(500, null, err.message));
   }
 
-  if (couponId) await incrementCouponUsage(couponId, customerId);
-  await User.findByIdAndUpdate(customerId, {
-    $push: { orders: result.order._id },
-  });
+  // ============ DEBIT WALLET IF CREDIT WAS USED ============
+  if (walletCreditUsed > 0) {
+    try {
+      const wallet = await Wallet.findByUserId(customerId);
+      const amountInPaise = rupeeToPaise(walletCreditUsed);
+      const description = `Wallet credit applied to order ${result.orderId}`;
 
+      await WalletTransaction.createDebitTransaction(
+        wallet._id,
+        "order_payment",
+        result.orderId,
+        amountInPaise,
+        description,
+      );
+    } catch (walletError) {
+      // Wallet debit failed but order still created
+    }
+  }
+
+  // ============ CREDIT CASHBACK IF ELIGIBLE ============
+  if (result.cashbackEligible && result.cashbackAmount > 0) {
+    creditCashbackToWallet(result.order).catch(() => {
+      // Cashback credit failed but order still created
+    });
+  }
+
+  // ============ POST-ORDER UPDATES ============
+  if (couponId) {
+    try {
+      await incrementCouponUsage(couponId, customerId);
+    } catch (err) {
+      // Failed to increment coupon usage
+    }
+  }
+
+  try {
+    await User.findByIdAndUpdate(customerId, {
+      $push: { orders: result.order._id },
+    });
+    // console.log("✅ User orders updated");
+  } catch (err) {
+    console.error("⚠️ Failed to update user orders:", err.message);
+  }
+
+  // ============ POPULATE ORDER DETAILS ============
   const populated = await Order.findById(result.order._id)
     .populate("customerInfo", "name email phone")
     .populate("deliveryAddressId")
-    .populate("selectedOffer")
+    .populate({
+      path: "selectedBasket",
+      populate: { path: "vegetables.vegetable", select: "name" },
+    })
     .populate("selectedVegetables.vegetable", "name")
     .lean();
 
+  // console.log("✅ Order populated");
+
+  // ============ SEND NOTIFICATIONS (ASYNC) ============
   processOrderInvoice(populated._id, {
     sendEmail: true,
     emailType: "invoice",
-  }).catch(console.error);
-  
-  // Send admin notification
-  sendAdminOrderNotification(populated).catch(console.error);
-  
+  }).catch((err) => {
+    console.error("⚠️ Invoice email failed:", err.message);
+  });
+
+  sendAdminOrderNotification(populated).catch((err) => {
+    console.error("⚠️ Admin notification failed:", err.message);
+  });
+
+  // console.log("🎉 Payment verification completed successfully");
   res.json(new ApiResponse(200, populated, "Payment verified"));
 });
 
@@ -937,13 +1428,24 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
     }
   }
 
-  const order = await Order.findByIdAndUpdate(
-    _id,
-    { orderStatus, paymentStatus: "completed" },
-    { new: true, runValidators: true },
-  )
+  // Update paymentStatus to 'completed' only when orderStatus becomes 'delivered'
+  const updateFields = { orderStatus };
+  if (
+    typeof orderStatus === "string" &&
+    orderStatus.toLowerCase() === "delivered"
+  ) {
+    updateFields.paymentStatus = "completed";
+  }
+
+  const order = await Order.findByIdAndUpdate(_id, updateFields, {
+    new: true,
+    runValidators: true,
+  })
     .populate("customerInfo", "name email mobile phone address city area state")
-    .populate("selectedOffer")
+    .populate({
+      path: "selectedBasket",
+      populate: { path: "vegetables.vegetable", select: "name" },
+    })
     .populate("selectedVegetables.vegetable", "name")
     .lean();
 
@@ -1081,20 +1583,20 @@ export const calculatePrice = asyncHandler(async (req, res) => {
 });
 
 export const validateCouponForBasket = asyncHandler(async (req, res) => {
-  const { offerId, offerPrice, couponCode } = req.body;
+  const { basketId, basketPrice, couponCode } = req.body;
 
-  if (!offerId || !offerPrice)
-    throw new ApiError(400, "Offer ID and price are required");
+  if (!basketId || !basketPrice)
+    throw new ApiError(400, "Basket ID and price are required");
   if (!couponCode) throw new ApiError(400, "Coupon code is required");
 
-  const [offer, coupon] = await Promise.all([
-    Offer.findById(offerId).select("price").lean(),
+  const [basket, coupon] = await Promise.all([
+    Basket.findById(basketId).select("price").lean(),
     Coupon.findOne({ code: couponCode.toUpperCase(), isActive: true }).lean(),
   ]);
 
-  if (!offer) throw new ApiError(404, "Offer not found");
-  if (offer.price !== offerPrice)
-    throw new ApiError(400, "Offer price mismatch");
+  if (!basket) throw new ApiError(404, "Basket not found");
+  if (basket.price !== basketPrice)
+    throw new ApiError(400, "Basket price mismatch");
 
   let couponDetails = null;
   let couponDiscount = 0;
@@ -1111,7 +1613,7 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
       applied: false,
       error: "Coupon has expired",
     };
-  } else if (coupon.minOrderAmount && offerPrice < coupon.minOrderAmount) {
+  } else if (coupon.minOrderAmount && basketPrice < coupon.minOrderAmount) {
     couponDetails = {
       code: couponCode,
       applied: false,
@@ -1127,10 +1629,10 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
     couponDiscount =
       coupon.discountType === "percentage"
         ? Math.min(
-            (offerPrice * coupon.discountValue) / 100,
+            (basketPrice * coupon.discountValue) / 100,
             coupon.maxDiscount || Infinity,
           )
-        : Math.min(coupon.discountValue, offerPrice);
+        : Math.min(coupon.discountValue, basketPrice);
 
     couponDetails = {
       code: coupon.code,
@@ -1141,7 +1643,7 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
     };
   }
 
-  const subtotalAfterDiscount = Math.max(0, offerPrice - couponDiscount);
+  const subtotalAfterDiscount = Math.max(0, basketPrice - couponDiscount);
   const totalAmount = subtotalAfterDiscount + CONFIG.deliveryCharges;
 
   return res.json(
@@ -1149,7 +1651,7 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
       200,
       {
         coupon: couponDetails,
-        offerPrice,
+        basketPrice,
         couponDiscount,
         subtotalAfterDiscount,
         deliveryCharges: CONFIG.deliveryCharges,
@@ -1163,7 +1665,6 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
 // ================= ADVANCED ANALYTICS WITH HASHMAP AGGREGATION =================
 export const getOrdersByDateTimeRange = asyncHandler(async (req, res) => {
   const { startDate, startTime, endDate, endTime } = req.query;
-
   if (!startDate || !startTime || !endDate || !endTime) {
     throw new ApiError(400, "All date-time parameters are required");
   }

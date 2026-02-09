@@ -58,7 +58,7 @@ WalletSchema.statics.createWallet = async function (userId) {
 // Pre-save hook
 WalletSchema.pre("save", function (next) {
   if (this.isModified("status") && this.status === "blocked") {
-    console.log(`Wallet ${this._id} blocked at ${new Date()}`);
+    // console.log(`Wallet ${this._id} blocked at ${new Date()}`);
   }
   next();
 });

@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import { ApiError } from "../utility/ApiError.js";
 import { asyncHandler } from "../utility/AsyncHandler.js";
 import User from "../Model/user.js";
+import mongoose from "mongoose";
 
 // ================= CONFIGURATION =================
 const CONFIG = Object.freeze({
@@ -12,7 +13,7 @@ const CONFIG = Object.freeze({
   rateLimit: {
     maxAttempts: 10,
     windowMs: 60 * 1000, // 60 seconds
-    cleanupIntervalMs: 60 * 1000 , // 1 hour
+    cleanupIntervalMs: 60 * 1000, // 1 hour
   },
   cache: {
     userTTL: 5 * 60 * 1000, // 5 minutes
@@ -32,13 +33,13 @@ class LRUCache {
   get(key) {
     if (!this.#cache.has(key)) return null;
     const value = this.#cache.get(key);
-    
+
     // Check if expired
     if (value.expiresAt && Date.now() > value.expiresAt) {
       this.#cache.delete(key);
       return null;
     }
-    
+
     // Move to end (most recently used)
     this.#cache.delete(key);
     this.#cache.set(key, value);
@@ -53,7 +54,7 @@ class LRUCache {
       const firstKey = this.#cache.keys().next().value;
       this.#cache.delete(firstKey);
     }
-    
+
     this.#cache.set(key, {
       data,
       expiresAt: ttl ? Date.now() + ttl : null,
@@ -79,18 +80,21 @@ const userCache = new LRUCache();
 // ================= TOKEN EXTRACTION UTILITY =================
 const extractToken = (req) => {
   // Priority: Cookie > Authorization header
-  return req.cookies?.accessToken || req.header("Authorization")?.replace(/^Bearer\s+/i, "");
+  return (
+    req.cookies?.accessToken ||
+    req.header("Authorization")?.replace(/^Bearer\s+/i, "")
+  );
 };
 
 // ================= TOKEN VERIFICATION UTILITY =================
 const verifyToken = (token) => {
   try {
     const decoded = jwt.verify(token, CONFIG.jwt.secret);
-    
+
     if (decoded.type !== CONFIG.jwt.accessType) {
       throw new ApiError(401, "Invalid token type");
     }
-    
+
     return decoded;
   } catch (error) {
     if (error.name === "JsonWebTokenError") {
@@ -110,7 +114,7 @@ const fetchUser = async (userId) => {
   if (cached) return cached;
 
   // Fetch from database
-  const user = await User.findById(userId)
+  const user = await User.findById(new mongoose.Types.ObjectId(userId))
     .select("-password -refreshToken")
     .lean();
 
@@ -145,14 +149,12 @@ const fetchUser = async (userId) => {
 // ================= VERIFY JWT MIDDLEWARE =================
 export const verifyJWT = asyncHandler(async (req, res, next) => {
   const token = extractToken(req);
-
   if (!token) {
     throw new ApiError(401, "Access token required. Please login.");
   }
 
   const decoded = verifyToken(token);
   req.user = await fetchUser(decoded.id);
-
   next();
 });
 
@@ -208,10 +210,13 @@ class SlidingWindowRateLimiter {
   #maxAttempts;
   #windowMs;
 
-  constructor(maxAttempts = CONFIG.rateLimit.maxAttempts, windowMs = CONFIG.rateLimit.windowMs) {
+  constructor(
+    maxAttempts = CONFIG.rateLimit.maxAttempts,
+    windowMs = CONFIG.rateLimit.windowMs,
+  ) {
     this.#maxAttempts = maxAttempts;
     this.#windowMs = windowMs;
-    
+
     // Start cleanup interval
     this.#startCleanup();
   }
@@ -222,14 +227,16 @@ class SlidingWindowRateLimiter {
 
     // Get or create attempt log
     let attempts = this.#attempts.get(identifier);
-    
+
     if (!attempts) {
       attempts = [];
       this.#attempts.set(identifier, attempts);
     }
 
     // Remove expired attempts (sliding window)
-    const validAttempts = attempts.filter(timestamp => timestamp > windowStart);
+    const validAttempts = attempts.filter(
+      (timestamp) => timestamp > windowStart,
+    );
     this.#attempts.set(identifier, validAttempts);
 
     // Check if rate limited
@@ -237,7 +244,7 @@ class SlidingWindowRateLimiter {
       const oldestAttempt = Math.min(...validAttempts);
       const resetTime = oldestAttempt + this.#windowMs;
       const waitMinutes = Math.ceil((resetTime - now) / 60000);
-      
+
       return {
         limited: true,
         waitMinutes,
@@ -263,8 +270,10 @@ class SlidingWindowRateLimiter {
 
       for (const [identifier, attempts] of this.#attempts.entries()) {
         // Remove expired attempts
-        const validAttempts = attempts.filter(timestamp => timestamp > windowStart);
-        
+        const validAttempts = attempts.filter(
+          (timestamp) => timestamp > windowStart,
+        );
+
         if (validAttempts.length === 0) {
           this.#attempts.delete(identifier);
         } else {
@@ -296,7 +305,10 @@ export const rateLimitLogin = (req, res, next) => {
 
   // Check if IP is blocked
   if (ipBlacklist.has(req.ip)) {
-    throw new ApiError(403, "Your IP address has been blocked due to multiple failed login attempts");
+    throw new ApiError(
+      403,
+      "Your IP address has been blocked due to multiple failed login attempts",
+    );
   }
 
   const result = loginRateLimiter.isRateLimited(identifier);
@@ -304,10 +316,10 @@ export const rateLimitLogin = (req, res, next) => {
   if (result.limited) {
     // Block the IP after 10 failed attempts
     blockIP(req.ip);
-    
+
     throw new ApiError(
       429,
-      `Too many login attempts. Your IP has been blocked for security. Please try again in ${result.waitMinutes} minute${result.waitMinutes > 1 ? 's' : ''}.`
+      `Too many login attempts. Your IP has been blocked for security. Please try again in ${result.waitMinutes} minute${result.waitMinutes > 1 ? "s" : ""}.`,
     );
   }
 
@@ -327,7 +339,7 @@ export const createRateLimiter = (options = {}) => {
 
   return (req, res, next) => {
     const key = keyGenerator(req);
-    
+
     if (!key) {
       return next();
     }
@@ -345,14 +357,17 @@ export const createRateLimiter = (options = {}) => {
 // ================= ROLE-BASED ACCESS CONTROL =================
 export const requireRoles = (...allowedRoles) => {
   const rolesSet = new Set(allowedRoles);
-  
+
   return asyncHandler(async (req, res, next) => {
     if (!req.user) {
       throw new ApiError(401, "Authentication required");
     }
 
     if (!rolesSet.has(req.user.role)) {
-      throw new ApiError(403, `Access denied. Required roles: ${allowedRoles.join(", ")}`);
+      throw new ApiError(
+        403,
+        `Access denied. Required roles: ${allowedRoles.join(", ")}`,
+      );
     }
 
     next();
@@ -362,26 +377,29 @@ export const requireRoles = (...allowedRoles) => {
 // ================= PERMISSION-BASED ACCESS CONTROL =================
 export const requirePermissions = (...requiredPermissions) => {
   const permissionsSet = new Set(requiredPermissions);
-  
+
   return asyncHandler(async (req, res, next) => {
     if (!req.user) {
       throw new ApiError(401, "Authentication required");
     }
 
     // Fetch full user with permissions if not cached
-    const user = await User.findById(req.user.id)
-      .select("permissions")
-      .lean();
+    const user = await User.findById(req.user.id).select("permissions").lean();
 
     if (!user || !user.permissions) {
       throw new ApiError(403, "Insufficient permissions");
     }
 
     const userPermissions = new Set(user.permissions);
-    const hasAllPermissions = [...permissionsSet].every(perm => userPermissions.has(perm));
+    const hasAllPermissions = [...permissionsSet].every((perm) =>
+      userPermissions.has(perm),
+    );
 
     if (!hasAllPermissions) {
-      throw new ApiError(403, `Missing permissions: ${requiredPermissions.join(", ")}`);
+      throw new ApiError(
+        403,
+        `Missing permissions: ${requiredPermissions.join(", ")}`,
+      );
     }
 
     next();

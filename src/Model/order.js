@@ -22,9 +22,9 @@ const orderSchema = new mongoose.Schema(
       required: true,
     },
 
-    selectedOffer: {
+    selectedBasket: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Offer",
+      ref: "Basket",
       required: function () {
         return this.orderType === "basket";
       },
@@ -105,8 +105,8 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // Basket/Offer price (only for basket orders)
-    offerPrice: {
+    // Basket price (only for basket orders)
+    basketPrice: {
       type: Number,
       min: 0,
       default: 0,
@@ -160,6 +160,42 @@ const orderSchema = new mongoose.Schema(
       min: 0,
     },
 
+    // ===== WALLET CREDIT FIELDS =====
+    walletCreditUsed: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    // Final amount to pay after wallet credit deduction
+    finalPayableAmount: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    // ===== CASHBACK FIELDS =====
+    cashbackEligible: {
+      type: Boolean,
+      default: false,
+    },
+
+    cashbackAmount: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    cashbackCredited: {
+      type: Boolean,
+      default: false,
+    },
+
+    cashbackCreditedAt: {
+      type: Date,
+      default: null,
+    },
+
     orderId: {
       type: String,
       required: true,
@@ -169,7 +205,7 @@ const orderSchema = new mongoose.Schema(
 
     paymentMethod: {
       type: String,
-      enum: ["COD", "ONLINE"],
+      enum: ["COD", "ONLINE", "WALLET"],
       required: true,
     },
 
@@ -211,11 +247,11 @@ const orderSchema = new mongoose.Schema(
       default: [],
     },
   },
-  { 
+  {
     timestamps: true,
     toJSON: { virtuals: true },
-    toObject: { virtuals: true }
-  }
+    toObject: { virtuals: true },
+  },
 );
 
 // ===== VIRTUALS =====
@@ -245,15 +281,15 @@ orderSchema.pre("save", function (next) {
   // Validate vegetables total
   const calculatedVegTotal = this.selectedVegetables.reduce(
     (sum, item) => sum + item.subtotal,
-    0
+    0,
   );
 
   if (this.orderType === "custom") {
     if (Math.abs(this.vegetablesTotal - calculatedVegTotal) > 0.01) {
       return next(
         new Error(
-          `Vegetables total mismatch. Expected ${calculatedVegTotal}, got ${this.vegetablesTotal}`
-        )
+          `Vegetables total mismatch. Expected ${calculatedVegTotal}, got ${this.vegetablesTotal}`,
+        ),
       );
     }
   }
@@ -266,7 +302,7 @@ orderSchema.pre("save", function (next) {
   // Validate subtotalAfterDiscount calculation
   let expectedSubtotal;
   if (this.orderType === "basket") {
-    expectedSubtotal = this.offerPrice - this.couponDiscount;
+    expectedSubtotal = this.basketPrice - this.couponDiscount;
   } else {
     expectedSubtotal = this.vegetablesTotal - this.couponDiscount;
   }
@@ -274,8 +310,8 @@ orderSchema.pre("save", function (next) {
   if (Math.abs(this.subtotalAfterDiscount - expectedSubtotal) > 0.01) {
     return next(
       new Error(
-        `Subtotal after discount mismatch. Expected ${expectedSubtotal}, got ${this.subtotalAfterDiscount}`
-      )
+        `Subtotal after discount mismatch. Expected ${expectedSubtotal}, got ${this.subtotalAfterDiscount}`,
+      ),
     );
   }
 
@@ -285,8 +321,8 @@ orderSchema.pre("save", function (next) {
   if (Math.abs(this.totalAmount - calculatedTotal) > 0.01) {
     return next(
       new Error(
-        `Total amount mismatch. Expected ${calculatedTotal}, got ${this.totalAmount}`
-      )
+        `Total amount mismatch. Expected ${calculatedTotal}, got ${this.totalAmount}`,
+      ),
     );
   }
 

@@ -5,8 +5,8 @@ export const ConnectDB = async () => {
       `${process.env.DB_URI}/${process.env.DB_NAME}`,
     );
     console.log("DB HOSTED ON:", connectionDB.connection.host);
-    } catch (error) {
+  } catch (error) {
       console.log("DataBase Connection ERROR:", error);
       process.exit(1);
-    }
-  };
+  }
+};

@@ -17,7 +17,7 @@ import mongoose from "mongoose";
  * @access  Private
  */
 export const getWallet = asyncHandler(async (req, res) => {
-  const userId = req.user._id;
+  const userId = req.user.id;
 
   const wallet = await Wallet.findByUserId(userId);
 
@@ -51,7 +51,7 @@ export const getWallet = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const createWallet = asyncHandler(async (req, res) => {
-  const userId = req.user._id;
+  const userId = req.user.id;
 
   const existingWallet = await Wallet.findByUserId(userId);
 
@@ -84,7 +84,7 @@ export const createWallet = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const getTransactionHistory = asyncHandler(async (req, res) => {
-  const userId = req.user._id;
+  const userId = req.user.id;
   const { page = 1, limit = 20, type, source } = req.query;
 
   const wallet = await Wallet.findByUserId(userId);
@@ -315,7 +315,7 @@ export const reverseTransaction = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const checkBalance = asyncHandler(async (req, res) => {
-  const userId = req.user._id;
+  const userId = req.user.id;
 
   const wallet = await Wallet.findByUserId(userId);
 

@@ -54,7 +54,7 @@ const invoiceSchema = new mongoose.Schema(
     payment: {
       method: {
         type: String,
-        enum: ["COD", "ONLINE"],
+        enum: ["COD", "ONLINE", "WALLET"],
         required: true,
       },
       status: {

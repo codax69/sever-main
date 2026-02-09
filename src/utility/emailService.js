@@ -317,7 +317,7 @@ VegBazar Team
     `,
     },
   };
-  
+
   return templates[type] || null;
 };
 
@@ -341,7 +341,6 @@ export const sendEmail = async (to, type, data) => {
 
     const info = await transporter.sendMail(mailOptions);
 
-    console.log(`Email sent successfully to ${to}: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error("Error sending email:", error);
@@ -367,7 +366,6 @@ export const verifyEmailConfig = async () => {
   try {
     const transporter = createEmailTransporter();
     await transporter.verify();
-    console.log("✅ Email service is ready");
     return true;
   } catch (error) {
     console.error("❌ Email service configuration error:", error);
