@@ -60,9 +60,9 @@ const razorpay = new Razorpay({
 
 // ✅ NEW: Input Sanitization Helper
 const sanitizeString = (str) => {
-  if (typeof str !== 'string') return str;
+  if (typeof str !== "string") return str;
   // Remove special regex characters to prevent NoSQL injection
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 };
 
 // ✅ NEW: Validate Numeric Input
@@ -118,7 +118,9 @@ const sendAdminOrderNotification = async (order) => {
     await transporter.sendMail(mailOptions);
   } catch (error) {
     // ✅ FIX: Don't expose internal details
-    console.error(`Failed to send admin notification for order ${order.orderId}`);
+    console.error(
+      `Failed to send admin notification for order ${order.orderId}`,
+    );
   }
 };
 
@@ -188,7 +190,9 @@ const generateUniqueOrderId = async (retries = CONFIG.orderIdRetries) => {
       // ✅ FIX: Better fallback - use timestamp + random
       if (i === retries - 1) {
         const timestamp = Date.now().toString().slice(-9);
-        const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+        const random = Math.floor(Math.random() * 1000)
+          .toString()
+          .padStart(3, "0");
         return `ORD${timestamp}${random}`;
       }
       await new Promise((r) => setTimeout(r, 50 << i));
@@ -388,12 +392,13 @@ const processVegetables = async (items, isBasket = false) => {
 
   // ✅ FIX: Validate max items
   if (items.length > CONFIG.maxItemsPerOrder) {
-    throw new Error(`Maximum ${CONFIG.maxItemsPerOrder} items allowed per order`);
+    throw new Error(
+      `Maximum ${CONFIG.maxItemsPerOrder} items allowed per order`,
+    );
   }
 
   const vegIds = [...new Set(items.map(getVegId).filter(Boolean))];
-  if (!vegIds.length)
-    throw new Error("No valid items");
+  if (!vegIds.length) throw new Error("No valid items");
 
   const isObjectId = /^[0-9a-fA-F]{24}$/.test(vegIds[0]);
   const vegetables = await Vegetable.find(
@@ -512,7 +517,7 @@ async function creditCashbackToWallet(order) {
       Math.round(order.cashbackAmount * 100),
       `Cashback for order ${order.orderId}`,
     );
-    
+
     await Order.findByIdAndUpdate(order._id, {
       cashbackCredited: true,
       cashbackCreditedAt: new Date(),
@@ -580,7 +585,7 @@ const validateCoupon = async (code, subtotal, userId = null) => {
     code: code.toUpperCase(),
     isActive: true,
   }).lean();
-  
+
   if (!coupon) throw new Error("Invalid coupon");
   if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date())
     throw new Error("Coupon expired");
@@ -621,17 +626,17 @@ const validateCoupon = async (code, subtotal, userId = null) => {
 // ✅ FIX: Clean order data before creation
 const cleanOrderData = (data) => {
   const cleaned = { ...data };
-  
+
   // Remove undefined values
-  Object.keys(cleaned).forEach(key => {
+  Object.keys(cleaned).forEach((key) => {
     if (cleaned[key] === undefined) {
       delete cleaned[key];
     }
   });
-  
+
   // ✅ CRITICAL FIX: Remove stockUpdates - it should NOT be stored
   delete cleaned.stockUpdates;
-  
+
   // ✅ FIX: Ensure required fields have proper defaults
   cleaned.walletCreditUsed = cleaned.walletCreditUsed || 0;
   cleaned.cashbackAmount = cleaned.cashbackAmount || 0;
@@ -639,12 +644,18 @@ const cleanOrderData = (data) => {
   cleaned.couponCode = cleaned.couponCode || null;
   cleaned.couponId = cleaned.couponId || null;
   cleaned.deliveryAddressId = cleaned.deliveryAddressId || null;
-  
+
   // ✅ FIX: Ensure finalPayableAmount is set
-  if (cleaned.finalPayableAmount === undefined || cleaned.finalPayableAmount === null) {
-    cleaned.finalPayableAmount = Math.max(0, cleaned.totalAmount - (cleaned.walletCreditUsed || 0));
+  if (
+    cleaned.finalPayableAmount === undefined ||
+    cleaned.finalPayableAmount === null
+  ) {
+    cleaned.finalPayableAmount = Math.max(
+      0,
+      cleaned.totalAmount - (cleaned.walletCreditUsed || 0),
+    );
   }
-  
+
   return cleaned;
 };
 
@@ -656,10 +667,10 @@ const createOrderWithRetry = async (
   for (let i = 0; i < maxRetries; i++) {
     try {
       const orderId = data.orderId || (await generateUniqueOrderId());
-      
+
       // ✅ FIX: Clean data before creating order
       const cleanedData = cleanOrderData({ ...data, orderId });
-      
+
       const order = await Order.create(cleanedData);
       return { order, orderId };
     } catch (err) {
@@ -667,15 +678,29 @@ const createOrderWithRetry = async (
         await new Promise((r) => setTimeout(r, 50 << i));
         continue;
       }
-      
+
       // ✅ FIX: Don't expose internal error details
-      console.error("Order creation failed:", err.name);
-      
+      console.error("Order creation failed:", err.name, err.code);
+
+      // Log full details for MongoDB validation errors (code 121)
+      if (err.code === 121 && err.errInfo) {
+        console.error(
+          "MongoDB $jsonSchema validation details:",
+          JSON.stringify(err.errInfo, null, 2),
+        );
+      }
+
       // Return user-friendly error
-      if (err.name === 'ValidationError') {
-        throw new Error("Order validation failed. Please check your order details.");
+      if (err.name === "ValidationError") {
+        throw new Error(
+          "Order validation failed. Please check your order details.",
+        );
       } else if (err.code === 11000) {
         throw new Error("Duplicate order detected. Please try again.");
+      } else if (err.code === 121) {
+        throw new Error(
+          "Order validation failed. Please try again or contact support.",
+        );
       } else {
         throw new Error("Failed to create order. Please try again.");
       }
@@ -703,7 +728,7 @@ export const getOrders = asyncHandler(async (req, res) => {
   const skip = (page - 1) * limit;
 
   const filter = {};
-  
+
   // ✅ FIX: Sanitize inputs to prevent NoSQL injection
   if (req.query.status) {
     const sanitized = sanitizeString(req.query.status);
@@ -785,16 +810,22 @@ export const addOrder = asyncHandler(async (req, res) => {
 
   // ✅ FIX: Enhanced validation
   if (!customerInfo)
-    return res.status(400).json(new ApiResponse(400, null, "Customer info required"));
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Customer info required"));
   if (!["basket", "custom"].includes(orderType))
-    return res.status(400).json(new ApiResponse(400, null, "Invalid order type"));
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Invalid order type"));
   if (orderType === "basket" && !selectedBasket)
     return res.status(400).json(new ApiResponse(400, null, "Basket required"));
   if (!Array.isArray(selectedVegetables) || !selectedVegetables.length) {
     return res.status(400).json(new ApiResponse(400, null, "Items required"));
   }
   if (!["COD", "ONLINE", "WALLET"].includes(paymentMethod))
-    return res.status(400).json(new ApiResponse(400, null, "Invalid payment method"));
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Invalid payment method"));
 
   const processed = await processOrderData(
     customerInfo,
@@ -802,7 +833,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     selectedVegetables,
     orderType,
   );
-  
+
   if (processed.error)
     return res.status(400).json(new ApiResponse(400, null, processed.error));
 
@@ -815,7 +846,9 @@ export const addOrder = asyncHandler(async (req, res) => {
 
   // ✅ FIX: Validate subtotal
   if (subtotal <= 0 || subtotal > CONFIG.maxOrderAmount) {
-    return res.status(400).json(new ApiResponse(400, null, "Invalid order amount"));
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Invalid order amount"));
   }
 
   let couponId = null,
@@ -848,7 +881,9 @@ export const addOrder = asyncHandler(async (req, res) => {
     const wallet = await Wallet.findByUserId(customerId);
 
     if (wallet && wallet.isActive()) {
-      const walletBalance = await WalletTransaction.getCurrentBalance(wallet._id);
+      const walletBalance = await WalletTransaction.getCurrentBalance(
+        wallet._id,
+      );
       const walletBalanceInRupees = walletBalance / 100;
       walletCreditUsed = Math.min(walletBalanceInRupees, totals.totalAmount);
       finalPayableAmount = Math.max(0, totals.totalAmount - walletCreditUsed);
@@ -909,7 +944,7 @@ export const addOrder = asyncHandler(async (req, res) => {
       if (walletCreditUsed > 0) {
         const wallet = await Wallet.findByUserId(customerId);
         const amountInPaise = rupeeToPaise(walletCreditUsed);
-        
+
         await WalletTransaction.createDebitTransaction(
           wallet._id,
           "order_payment",
@@ -957,7 +992,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     } catch (err) {
       await session.abortTransaction();
       session.endSession();
-      
+
       // Restore stock
       try {
         await updateStock(processedVegetables, "restore");
@@ -986,16 +1021,20 @@ export const addOrder = asyncHandler(async (req, res) => {
     const wallet = await Wallet.findByUserId(customerId);
 
     if (!wallet) {
-      return res.status(404).json(
-        new ApiResponse(404, null, "Wallet not found"),
-      );
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Wallet not found"));
     }
 
     if (!wallet.isActive()) {
-      return res.status(400).json(new ApiResponse(400, null, "Wallet inactive"));
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Wallet inactive"));
     }
 
-    const currentBalance = await WalletTransaction.getCurrentBalance(wallet._id);
+    const currentBalance = await WalletTransaction.getCurrentBalance(
+      wallet._id,
+    );
     const amountInPaise = rupeeToPaise(totals.totalAmount);
 
     if (currentBalance < amountInPaise) {
@@ -1190,10 +1229,14 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 
   // Validation
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-    return res.status(400).json(new ApiResponse(400, null, "Missing payment data"));
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Missing payment data"));
   }
   if (!customerInfo || !selectedVegetables || !orderId) {
-    return res.status(400).json(new ApiResponse(400, null, "Missing order data"));
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Missing order data"));
   }
   if (orderType === "basket" && !selectedBasket) {
     return res.status(400).json(new ApiResponse(400, null, "Missing basket"));
@@ -1206,7 +1249,9 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     .digest("hex");
 
   if (expectedSig !== razorpay_signature) {
-    return res.status(400).json(new ApiResponse(400, null, "Invalid signature"));
+    return res
+      .status(400)
+      .json(new ApiResponse(400, null, "Invalid signature"));
   }
 
   // Check duplicate
@@ -1262,7 +1307,9 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     const wallet = await Wallet.findByUserId(customerId);
 
     if (wallet && wallet.isActive()) {
-      const walletBalance = await WalletTransaction.getCurrentBalance(wallet._id);
+      const walletBalance = await WalletTransaction.getCurrentBalance(
+        wallet._id,
+      );
       const walletBalanceInRupees = walletBalance / 100;
       walletCreditUsed = Math.min(walletBalanceInRupees, totals.totalAmount);
       finalPayableAmount = Math.max(0, totals.totalAmount - walletCreditUsed);
@@ -1388,20 +1435,22 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
   const sanitizedStatus = sanitizeString(orderStatus);
 
   if (!CONFIG.validStatuses.has(sanitizedStatus)) {
-    return res.status(400).json(
-      new ApiResponse(
-        400,
-        null,
-        `Invalid status. Use: ${[...CONFIG.validStatuses].join(", ")}`,
-      ),
-    );
+    return res
+      .status(400)
+      .json(
+        new ApiResponse(
+          400,
+          null,
+          `Invalid status. Use: ${[...CONFIG.validStatuses].join(", ")}`,
+        ),
+      );
   }
 
   const current = await Order.findById(_id, {
     orderStatus: 1,
     selectedVegetables: 1,
   }).lean();
-  
+
   if (!current)
     return res.status(404).json(new ApiResponse(404, null, "Order not found"));
 
@@ -1462,9 +1511,13 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
 
 export const getRazorpayKey = asyncHandler(async (req, res) => {
   if (!process.env.RAZORPAY_KEY_ID) {
-    return res.status(500).json(new ApiResponse(500, null, "Key not configured"));
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Key not configured"));
   }
-  res.json(new ApiResponse(200, { key: process.env.RAZORPAY_KEY_ID }, "Key fetched"));
+  res.json(
+    new ApiResponse(200, { key: process.env.RAZORPAY_KEY_ID }, "Key fetched"),
+  );
 });
 
 export const calculatePrice = asyncHandler(async (req, res) => {
@@ -1481,7 +1534,12 @@ export const calculatePrice = asyncHandler(async (req, res) => {
   const calculatedItems = [];
 
   for (const item of items) {
-    if (!item.vegetableId || !item.weight || !item.quantity || item.quantity < 1) {
+    if (
+      !item.vegetableId ||
+      !item.weight ||
+      !item.quantity ||
+      item.quantity < 1
+    ) {
       throw new ApiError(400, "Invalid item");
     }
 
@@ -1491,7 +1549,8 @@ export const calculatePrice = asyncHandler(async (req, res) => {
     }
 
     const veg = await Vegetable.findById(item.vegetableId).lean();
-    if (!veg) throw new ApiError(404, `Vegetable not found: ${item.vegetableId}`);
+    if (!veg)
+      throw new ApiError(404, `Vegetable not found: ${item.vegetableId}`);
 
     try {
       const priceInfo = getPrice(veg, item.weight, item.quantity);
@@ -1943,7 +2002,7 @@ export const getOrdersByMultipleStatuses = asyncHandler(async (req, res) => {
   const statusSet = new Set(
     statuses.split(",").map((s) => sanitizeString(s.trim().toLowerCase())),
   );
-  
+
   const query = {
     orderStatus: {
       $in: Array.from(statusSet).map((s) => new RegExp(`^${s}$`, "i")),
