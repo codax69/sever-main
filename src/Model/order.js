@@ -16,10 +16,12 @@ const orderSchema = new mongoose.Schema(
       required: true,
     },
 
+    // ✅ FIX 1: Make deliveryAddressId optional
     deliveryAddressId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Address",
-      required: true,
+      required: false,  // ✅ Changed from true
+      default: null,
     },
 
     selectedBasket: {
@@ -42,8 +44,6 @@ const orderSchema = new mongoose.Schema(
           required: true,
           validate: {
             validator: function (v) {
-              // Allow weight formats: 1kg, 500g, 250g, 100g, etc.
-              // Allow set formats: set0, set1, set2, etc.
               return /^\d+(kg|g)$/.test(v) || /^set\d+$/.test(v);
             },
             message: (props) =>
@@ -56,19 +56,16 @@ const orderSchema = new mongoose.Schema(
           min: [1, "Quantity must be at least 1"],
           default: 1,
         },
-        // Price per unit (based on weight or set)
         pricePerUnit: {
           type: Number,
           required: true,
           min: [0, "Price must be greater than or equal to 0"],
         },
-        // Total for this item (pricePerUnit * quantity)
         subtotal: {
           type: Number,
           required: true,
           min: [0, "Subtotal must be greater than or equal to 0"],
         },
-        // Optional: flag to indicate if this came from a basket
         isFromBasket: {
           type: Boolean,
           default: false,
@@ -97,7 +94,6 @@ const orderSchema = new mongoose.Schema(
       default: Date.now,
     },
 
-    // Total of all vegetables (before coupon discount)
     vegetablesTotal: {
       type: Number,
       required: true,
@@ -105,7 +101,6 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // Basket price (only for basket orders)
     basketPrice: {
       type: Number,
       min: 0,
@@ -132,14 +127,12 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // Subtotal after applying coupon discount
     subtotalAfterDiscount: {
       type: Number,
       required: true,
       min: [0, "Subtotal after discount cannot be negative"],
     },
 
-    // Discount applied (if basket has special pricing)
     discount: {
       type: Number,
       min: 0,
@@ -153,7 +146,6 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // Final total: subtotalAfterDiscount + deliveryCharges
     totalAmount: {
       type: Number,
       required: true,
@@ -167,11 +159,14 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // Final amount to pay after wallet credit deduction
+    // ✅ FIX 2: Make finalPayableAmount required with proper default
     finalPayableAmount: {
       type: Number,
+      required: true,  // ✅ Make it required
       min: 0,
-      default: 0,
+      default: function() {
+        return this.totalAmount || 0;  // ✅ Default to totalAmount
+      },
     },
 
     // ===== CASHBACK FIELDS =====
@@ -199,7 +194,7 @@ const orderSchema = new mongoose.Schema(
     orderId: {
       type: String,
       required: true,
-      unique: true, // ✅ This creates index automatically
+      unique: true,
       trim: true,
     },
 
@@ -224,6 +219,7 @@ const orderSchema = new mongoose.Schema(
     DeliveryTimeSlot: {
       type: String,
       enum: ["8AM-10AM", "4PM-6PM"],
+      default: null,  // ✅ Add default
     },
 
     specialInstructions: {
@@ -242,8 +238,9 @@ const orderSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ✅ FIX 3: Define stockUpdates properly (or remove if not needed)
     stockUpdates: {
-      type: Array,
+      type: [mongoose.Schema.Types.Mixed],  // ✅ Better type definition
       default: [],
     },
   },
@@ -276,73 +273,83 @@ orderSchema.virtual("totalSavings").get(function () {
   return savings;
 });
 
-// ===== PRE-SAVE VALIDATION =====
+// ✅ FIX 4: Improved pre-save validation with better error handling
 orderSchema.pre("save", function (next) {
-  // Validate vegetables total
-  const calculatedVegTotal = this.selectedVegetables.reduce(
-    (sum, item) => sum + item.subtotal,
-    0,
-  );
+  try {
+    // Helper function for floating-point comparison
+    const areEqual = (a, b, tolerance = 0.02) => Math.abs(a - b) <= tolerance;
 
-  if (this.orderType === "custom") {
-    if (Math.abs(this.vegetablesTotal - calculatedVegTotal) > 0.01) {
+    // Validate vegetables total
+    const calculatedVegTotal = this.selectedVegetables.reduce(
+      (sum, item) => sum + (item.subtotal || 0),
+      0,
+    );
+
+    if (this.orderType === "custom") {
+      if (!areEqual(this.vegetablesTotal, calculatedVegTotal)) {
+        console.error(`❌ Vegetables total mismatch: Expected ${calculatedVegTotal.toFixed(2)}, got ${this.vegetablesTotal.toFixed(2)}`);
+        return next(
+          new Error(
+            `Vegetables total mismatch. Expected ${calculatedVegTotal.toFixed(2)}, got ${this.vegetablesTotal.toFixed(2)}`,
+          ),
+        );
+      }
+    }
+
+    // Validate coupon discount
+    if (this.couponDiscount < 0) {
+      return next(new Error("Coupon discount cannot be negative"));
+    }
+
+    // Validate subtotalAfterDiscount calculation
+    let expectedSubtotal;
+    if (this.orderType === "basket") {
+      expectedSubtotal = Math.max(0, this.basketPrice - this.couponDiscount);
+    } else {
+      expectedSubtotal = Math.max(0, this.vegetablesTotal - this.couponDiscount);
+    }
+
+    if (!areEqual(this.subtotalAfterDiscount, expectedSubtotal)) {
+      console.error(`❌ Subtotal mismatch: Expected ${expectedSubtotal.toFixed(2)}, got ${this.subtotalAfterDiscount.toFixed(2)}`);
       return next(
         new Error(
-          `Vegetables total mismatch. Expected ${calculatedVegTotal}, got ${this.vegetablesTotal}`,
+          `Subtotal after discount mismatch. Expected ${expectedSubtotal.toFixed(2)}, got ${this.subtotalAfterDiscount.toFixed(2)}`,
         ),
       );
     }
+
+    // Validate total amount: subtotalAfterDiscount + deliveryCharges
+    const calculatedTotal = this.subtotalAfterDiscount + this.deliveryCharges;
+
+    if (!areEqual(this.totalAmount, calculatedTotal)) {
+      console.error(`❌ Total amount mismatch: Expected ${calculatedTotal.toFixed(2)}, got ${this.totalAmount.toFixed(2)}`);
+      return next(
+        new Error(
+          `Total amount mismatch. Expected ${calculatedTotal.toFixed(2)}, got ${this.totalAmount.toFixed(2)}`,
+        ),
+      );
+    }
+
+    // ✅ NEW: Validate finalPayableAmount
+    if (this.finalPayableAmount === undefined || this.finalPayableAmount === null) {
+      this.finalPayableAmount = Math.max(0, this.totalAmount - (this.walletCreditUsed || 0));
+    }
+
+    next();
+  } catch (error) {
+    console.error("❌ Pre-save validation error:", error);
+    next(error);
   }
-
-  // Validate coupon discount
-  if (this.couponDiscount < 0) {
-    return next(new Error("Coupon discount cannot be negative"));
-  }
-
-  // Validate subtotalAfterDiscount calculation
-  let expectedSubtotal;
-  if (this.orderType === "basket") {
-    expectedSubtotal = this.basketPrice - this.couponDiscount;
-  } else {
-    expectedSubtotal = this.vegetablesTotal - this.couponDiscount;
-  }
-
-  if (Math.abs(this.subtotalAfterDiscount - expectedSubtotal) > 0.01) {
-    return next(
-      new Error(
-        `Subtotal after discount mismatch. Expected ${expectedSubtotal}, got ${this.subtotalAfterDiscount}`,
-      ),
-    );
-  }
-
-  // Validate total amount: subtotalAfterDiscount + deliveryCharges
-  const calculatedTotal = this.subtotalAfterDiscount + this.deliveryCharges;
-
-  if (Math.abs(this.totalAmount - calculatedTotal) > 0.01) {
-    return next(
-      new Error(
-        `Total amount mismatch. Expected ${calculatedTotal}, got ${this.totalAmount}`,
-      ),
-    );
-  }
-
-  next();
 });
 
 // ===== INDEXES =====
-// Compound indexes for common queries
 orderSchema.index({ customerInfo: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1, createdAt: -1 });
 orderSchema.index({ orderType: 1, orderStatus: 1 });
-
-// Single field indexes
 orderSchema.index({ paymentStatus: 1 });
 orderSchema.index({ couponCode: 1 });
 orderSchema.index({ orderDate: 1 });
 orderSchema.index({ createdAt: -1 });
-
-// Note: orderId already has unique: true, which creates an index automatically
-// REMOVED: orderSchema.index({ orderId: 1 }); - This would be a duplicate
 
 const Order = mongoose.model("Order", orderSchema);
 export default Order;

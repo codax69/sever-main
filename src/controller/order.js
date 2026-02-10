@@ -47,12 +47,32 @@ const CONFIG = Object.freeze({
     ["250g", "weight250g"],
     ["100g", "weight100g"],
   ]),
+  // ✅ NEW: Add validation limits
+  maxOrderAmount: 100000, // ₹1 lakh max
+  maxQuantity: 1000,
+  maxItemsPerOrder: 50,
 });
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_SECRET,
 });
+
+// ✅ NEW: Input Sanitization Helper
+const sanitizeString = (str) => {
+  if (typeof str !== 'string') return str;
+  // Remove special regex characters to prevent NoSQL injection
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+// ✅ NEW: Validate Numeric Input
+const validateNumeric = (value, min = 0, max = CONFIG.maxOrderAmount) => {
+  const num = Number(value);
+  if (isNaN(num) || num < min || num > max) {
+    throw new Error(`Invalid numeric value: ${value}`);
+  }
+  return num;
+};
 
 // ================= ADMIN EMAIL NOTIFICATION =================
 const sendAdminOrderNotification = async (order) => {
@@ -91,17 +111,14 @@ const sendAdminOrderNotification = async (order) => {
     const mailOptions = {
       from: { name: "VegBazar Admin", address: process.env.EMAIL_USER },
       to: adminEmail,
-      subject: `Order #${order.orderId} - ${(order.totalAmount || 0).toFixed(2)}`,
+      subject: `Order #${order.orderId} - ₹${(order.totalAmount || 0).toFixed(2)}`,
       html,
     };
 
     await transporter.sendMail(mailOptions);
-    // console.log(`Admin notification sent for order ${order.orderId}`);
   } catch (error) {
-    console.error(
-      `Failed to send admin notification for order ${order.orderId}:`,
-      error.message,
-    );
+    // ✅ FIX: Don't expose internal details
+    console.error(`Failed to send admin notification for order ${order.orderId}`);
   }
 };
 
@@ -168,7 +185,12 @@ const generateUniqueOrderId = async (retries = CONFIG.orderIdRetries) => {
         return orderId;
       }
     } catch (error) {
-      if (i === retries - 1) return `ORD${Date.now().toString().slice(-9)}`;
+      // ✅ FIX: Better fallback - use timestamp + random
+      if (i === retries - 1) {
+        const timestamp = Date.now().toString().slice(-9);
+        const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+        return `ORD${timestamp}${random}`;
+      }
       await new Promise((r) => setTimeout(r, 50 << i));
     }
   }
@@ -364,13 +386,14 @@ const getVegId = (item) => {
 const processVegetables = async (items, isBasket = false) => {
   if (!Array.isArray(items) || !items.length) throw new Error("Items required");
 
+  // ✅ FIX: Validate max items
+  if (items.length > CONFIG.maxItemsPerOrder) {
+    throw new Error(`Maximum ${CONFIG.maxItemsPerOrder} items allowed per order`);
+  }
+
   const vegIds = [...new Set(items.map(getVegId).filter(Boolean))];
   if (!vegIds.length)
-    throw new Error("No valid items. Received: " + JSON.stringify(items));
-
-  if (!vegIds.length) {
     throw new Error("No valid items");
-  }
 
   const isObjectId = /^[0-9a-fA-F]{24}$/.test(vegIds[0]);
   const vegetables = await Vegetable.find(
@@ -397,6 +420,12 @@ const processVegetables = async (items, isBasket = false) => {
 
     const weight = item.weight || "1kg";
     const qty = item.quantity || 1;
+
+    // ✅ FIX: Validate quantity
+    if (qty < 1 || qty > CONFIG.maxQuantity) {
+      throw new Error(`Invalid quantity for ${veg.name}: ${qty}`);
+    }
+
     const key = `${veg._id}_${weight}`;
 
     if (grouped.has(key)) {
@@ -455,14 +484,8 @@ const processOrderData = async (
 };
 
 // ================= CASHBACK MANAGEMENT =================
-/**
- * Credit cashback to user's wallet
- * @param {Object} order - Order object with cashback details
- * @returns {Promise<Object>} Cashback credit result
- */
 async function creditCashbackToWallet(order) {
   try {
-    // Check if cashback is eligible and not already credited
     if (
       !order.cashbackEligible ||
       order.cashbackCredited ||
@@ -472,21 +495,16 @@ async function creditCashbackToWallet(order) {
     }
 
     const customerId = order.customerInfo;
-
-    // Get or create wallet
     let wallet = await Wallet.findByUserId(customerId);
 
     if (!wallet) {
-      // Auto-create wallet if doesn't exist
       wallet = await Wallet.createWallet(customerId);
     }
 
-    // Check if wallet is active
     if (!wallet.isActive()) {
       return { success: false, reason: "Wallet inactive" };
     }
-    // Credit cashback to wallet
-    // Create transaction
+
     const transaction = await WalletTransaction.createCreditTransaction(
       wallet._id,
       "cashback",
@@ -494,6 +512,7 @@ async function creditCashbackToWallet(order) {
       Math.round(order.cashbackAmount * 100),
       `Cashback for order ${order.orderId}`,
     );
+    
     await Order.findByIdAndUpdate(order._id, {
       cashbackCredited: true,
       cashbackCreditedAt: new Date(),
@@ -505,7 +524,7 @@ async function creditCashbackToWallet(order) {
       transaction: transaction[0],
     };
   } catch (error) {
-    console.error("❌ Cashback credit failed:", error.message);
+    console.error("Cashback credit failed");
     return { success: false, error: error.message };
   }
 }
@@ -561,6 +580,7 @@ const validateCoupon = async (code, subtotal, userId = null) => {
     code: code.toUpperCase(),
     isActive: true,
   }).lean();
+  
   if (!coupon) throw new Error("Invalid coupon");
   if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date())
     throw new Error("Coupon expired");
@@ -598,6 +618,36 @@ const validateCoupon = async (code, subtotal, userId = null) => {
   };
 };
 
+// ✅ FIX: Clean order data before creation
+const cleanOrderData = (data) => {
+  const cleaned = { ...data };
+  
+  // Remove undefined values
+  Object.keys(cleaned).forEach(key => {
+    if (cleaned[key] === undefined) {
+      delete cleaned[key];
+    }
+  });
+  
+  // ✅ CRITICAL FIX: Remove stockUpdates - it should NOT be stored
+  delete cleaned.stockUpdates;
+  
+  // ✅ FIX: Ensure required fields have proper defaults
+  cleaned.walletCreditUsed = cleaned.walletCreditUsed || 0;
+  cleaned.cashbackAmount = cleaned.cashbackAmount || 0;
+  cleaned.cashbackEligible = cleaned.cashbackEligible || false;
+  cleaned.couponCode = cleaned.couponCode || null;
+  cleaned.couponId = cleaned.couponId || null;
+  cleaned.deliveryAddressId = cleaned.deliveryAddressId || null;
+  
+  // ✅ FIX: Ensure finalPayableAmount is set
+  if (cleaned.finalPayableAmount === undefined || cleaned.finalPayableAmount === null) {
+    cleaned.finalPayableAmount = Math.max(0, cleaned.totalAmount - (cleaned.walletCreditUsed || 0));
+  }
+  
+  return cleaned;
+};
+
 // ================= ORDER CREATION WITH RETRY =================
 const createOrderWithRetry = async (
   data,
@@ -605,26 +655,33 @@ const createOrderWithRetry = async (
 ) => {
   for (let i = 0; i < maxRetries; i++) {
     try {
-      // ✅ Use provided orderId if exists, otherwise generate new one
       const orderId = data.orderId || (await generateUniqueOrderId());
-      const order = await Order.create({ ...data, orderId });
+      
+      // ✅ FIX: Clean data before creating order
+      const cleanedData = cleanOrderData({ ...data, orderId });
+      
+      const order = await Order.create(cleanedData);
       return { order, orderId };
     } catch (err) {
       if (err.code === 11000 && i < maxRetries - 1) {
         await new Promise((r) => setTimeout(r, 50 << i));
         continue;
       }
-      // ✅ Enhanced error logging
-      console.error("❌ Order creation error:", {
-        code: err.code,
-        message: err.message,
-        errors: err.errors,
-        name: err.name,
-      });
-      throw err;
+      
+      // ✅ FIX: Don't expose internal error details
+      console.error("Order creation failed:", err.name);
+      
+      // Return user-friendly error
+      if (err.name === 'ValidationError') {
+        throw new Error("Order validation failed. Please check your order details.");
+      } else if (err.code === 11000) {
+        throw new Error("Duplicate order detected. Please try again.");
+      } else {
+        throw new Error("Failed to create order. Please try again.");
+      }
     }
   }
-  throw new Error("Failed to create order");
+  throw new Error("Failed to create order after multiple attempts");
 };
 
 // ================= CONTROLLERS =================
@@ -641,14 +698,25 @@ export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
 });
 
 export const getOrders = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page);
-  const limit = parseInt(req.query.limit);
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
   const skip = (page - 1) * limit;
 
   const filter = {};
-  if (req.query.status) filter.paymentStatus = req.query.status;
-  if (req.query.paymentMethod) filter.paymentMethod = req.query.paymentMethod;
-  if (req.query.orderType) filter.orderType = req.query.orderType;
+  
+  // ✅ FIX: Sanitize inputs to prevent NoSQL injection
+  if (req.query.status) {
+    const sanitized = sanitizeString(req.query.status);
+    filter.paymentStatus = sanitized;
+  }
+  if (req.query.paymentMethod) {
+    const sanitized = sanitizeString(req.query.paymentMethod);
+    filter.paymentMethod = sanitized;
+  }
+  if (req.query.orderType) {
+    const sanitized = sanitizeString(req.query.orderType);
+    filter.orderType = sanitized;
+  }
 
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
@@ -685,7 +753,7 @@ export const getOrders = asyncHandler(async (req, res) => {
 
 export const getOrderById = asyncHandler(async (req, res) => {
   const { orderId } = req.params;
-  if (!/^ORD\d{11}$/.test(orderId)) {
+  if (!/^ORD\d{11,12}$/.test(orderId)) {
     return res.status(400).json(new ApiResponse(400, null, "Invalid order ID"));
   }
 
@@ -715,24 +783,18 @@ export const addOrder = asyncHandler(async (req, res) => {
     deliveryAddressId,
   } = req.body;
 
-  // Validation
+  // ✅ FIX: Enhanced validation
   if (!customerInfo)
-    return res
-      .status(400)
-      .json(new ApiResponse(400, null, "Customer info required"));
+    return res.status(400).json(new ApiResponse(400, null, "Customer info required"));
   if (!["basket", "custom"].includes(orderType))
-    return res
-      .status(400)
-      .json(new ApiResponse(400, null, "Invalid order type"));
+    return res.status(400).json(new ApiResponse(400, null, "Invalid order type"));
   if (orderType === "basket" && !selectedBasket)
     return res.status(400).json(new ApiResponse(400, null, "Basket required"));
   if (!Array.isArray(selectedVegetables) || !selectedVegetables.length) {
     return res.status(400).json(new ApiResponse(400, null, "Items required"));
   }
   if (!["COD", "ONLINE", "WALLET"].includes(paymentMethod))
-    return res
-      .status(400)
-      .json(new ApiResponse(400, null, "Invalid payment method"));
+    return res.status(400).json(new ApiResponse(400, null, "Invalid payment method"));
 
   const processed = await processOrderData(
     customerInfo,
@@ -740,6 +802,7 @@ export const addOrder = asyncHandler(async (req, res) => {
     selectedVegetables,
     orderType,
   );
+  
   if (processed.error)
     return res.status(400).json(new ApiResponse(400, null, processed.error));
 
@@ -749,6 +812,11 @@ export const addOrder = asyncHandler(async (req, res) => {
     orderType === "basket"
       ? (await Basket.findById(basketId, { price: 1 }).lean()).price
       : processedVegetables.reduce((sum, i) => sum + i.subtotal, 0);
+
+  // ✅ FIX: Validate subtotal
+  if (subtotal <= 0 || subtotal > CONFIG.maxOrderAmount) {
+    return res.status(400).json(new ApiResponse(400, null, "Invalid order amount"));
+  }
 
   let couponId = null,
     couponDiscount = 0,
@@ -773,48 +841,37 @@ export const addOrder = asyncHandler(async (req, res) => {
     couponDiscount,
   );
 
-  // ================= APPLY WALLET CREDIT (IF AVAILABLE) =================
   let walletCreditUsed = 0;
   let finalPayableAmount = totals.totalAmount;
-  let walletBalance = 0;
 
-  // Check if user has a wallet and apply credit
   try {
     const wallet = await Wallet.findByUserId(customerId);
 
     if (wallet && wallet.isActive()) {
-      walletBalance = await WalletTransaction.getCurrentBalance(wallet._id);
+      const walletBalance = await WalletTransaction.getCurrentBalance(wallet._id);
       const walletBalanceInRupees = walletBalance / 100;
-
-      // Apply wallet credit (use minimum of wallet balance or order total)
       walletCreditUsed = Math.min(walletBalanceInRupees, totals.totalAmount);
       finalPayableAmount = Math.max(0, totals.totalAmount - walletCreditUsed);
     }
   } catch (error) {
-    // If wallet check fails, continue without wallet credit
+    // Continue without wallet credit
   }
 
   // ================= COD PAYMENT FLOW =================
   if (paymentMethod === "COD") {
-    let stockUpdates;
-    try {
-      stockUpdates = await updateStock(processedVegetables, "deduct");
-    } catch (err) {
-      return res.status(400).json(new ApiResponse(400, null, err.message));
-    }
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    let result;
     try {
-      // ✅ Pass orderId explicitly in the data object
+      // 1. Update stock
+      const stockUpdates = await updateStock(processedVegetables, "deduct");
       const orderId = await generateUniqueOrderId();
 
-      // Count completed orders for cashback eligibility
       const completedOrderCount = await Order.countDocuments({
         customerInfo: customerId,
         orderStatus: { $in: ["placed", "processed", "shipped", "delivered"] },
       });
 
-      // Calculate cashback
       const orderForCashback = {
         finalPayableAmount,
         totalAmount: totals.totalAmount,
@@ -827,8 +884,9 @@ export const addOrder = asyncHandler(async (req, res) => {
       );
       const cashbackEligible = cashbackAmount > 0;
 
-      result = await createOrderWithRetry({
-        orderId, // ✅ Explicitly pass orderId
+      // 2. Create order (stockUpdates will be removed by cleanOrderData)
+      const result = await createOrderWithRetry({
+        orderId,
         orderType,
         customerInfo: customerId,
         selectedVegetables: processedVegetables,
@@ -843,75 +901,74 @@ export const addOrder = asyncHandler(async (req, res) => {
         paymentMethod: "COD",
         paymentStatus: finalPayableAmount === 0 ? "completed" : "pending",
         orderStatus: "placed",
-        stockUpdates,
         deliveryAddressId,
         ...(orderType === "basket" && { selectedBasket: basketId }),
       });
-      // console.log("✅ Order created:", result.order._id);
-    } catch (err) {
-      console.error("❌ COD Order creation failed:", err);
-      await updateStock(processedVegetables, "restore");
-      return res.status(500).json(new ApiResponse(500, null, err.message));
-    }
 
-    // ============ DEBIT WALLET IF CREDIT WAS USED ============
-    if (walletCreditUsed > 0) {
-      try {
+      // 3. Debit wallet if needed
+      if (walletCreditUsed > 0) {
         const wallet = await Wallet.findByUserId(customerId);
         const amountInPaise = rupeeToPaise(walletCreditUsed);
-        const description = `Wallet credit applied to order ${result.orderId}`;
-
+        
         await WalletTransaction.createDebitTransaction(
           wallet._id,
           "order_payment",
           result.orderId,
           amountInPaise,
-          description,
+          `Wallet credit applied to order ${result.orderId}`,
         );
-      } catch (walletError) {
-        // Wallet debit failed but order still created
       }
-    }
 
-    // ============ CREDIT CASHBACK IF ELIGIBLE ============
-    if (result.cashbackEligible && result.cashbackAmount > 0) {
-      creditCashbackToWallet(result.order).catch((error) => {
-        console.error(
-          "⚠️ Cashback credit failed (order still created):",
-          error,
-        );
+      // 4. Increment coupon usage
+      if (couponId) await incrementCouponUsage(couponId, customerId);
+
+      // 5. Update user orders
+      await User.findByIdAndUpdate(customerId, {
+        $push: { orders: result.order._id },
       });
+
+      await session.commitTransaction();
+      session.endSession();
+
+      // 6. Credit cashback (async - don't wait)
+      if (cashbackEligible && cashbackAmount > 0) {
+        creditCashbackToWallet(result.order).catch(() => {});
+      }
+
+      // 7. Populate and return
+      const populated = await Order.findById(result.order._id)
+        .populate("customerInfo", "name email phone")
+        .populate("deliveryAddressId")
+        .populate({
+          path: "selectedBasket",
+          populate: { path: "vegetables.vegetable", select: "name" },
+        })
+        .populate("selectedVegetables.vegetable", "name")
+        .lean();
+
+      // 8. Send notifications (async)
+      processOrderInvoice(populated._id, {
+        sendEmail: true,
+        emailType: "invoice",
+      }).catch(() => {});
+      sendAdminOrderNotification(populated).catch(() => {});
+
+      return res.json(new ApiResponse(201, populated, "Order placed with COD"));
+    } catch (err) {
+      await session.abortTransaction();
+      session.endSession();
+      
+      // Restore stock
+      try {
+        await updateStock(processedVegetables, "restore");
+      } catch (restoreErr) {}
+
+      return res.status(500).json(new ApiResponse(500, null, err.message));
     }
-
-    if (couponId) await incrementCouponUsage(couponId, customerId);
-    await User.findByIdAndUpdate(customerId, {
-      $push: { orders: result.order._id },
-    });
-
-    const populated = await Order.findById(result.order._id)
-      .populate("customerInfo", "name email phone")
-      .populate("deliveryAddressId")
-      .populate({
-        path: "selectedBasket",
-        populate: { path: "vegetables.vegetable", select: "name" },
-      })
-      .populate("selectedVegetables.vegetable", "name")
-      .lean();
-
-    processOrderInvoice(populated._id, {
-      sendEmail: true,
-      emailType: "invoice",
-    }).catch(console.error);
-
-    sendAdminOrderNotification(populated).catch(console.error);
-
-    return res.json(new ApiResponse(201, populated, "Order placed with COD"));
   }
 
   // ================= WALLET PAYMENT FLOW =================
   if (paymentMethod === "WALLET") {
-    // Wallet credit should already be calculated above
-    // Check if wallet can cover the full amount
     if (finalPayableAmount > 0) {
       return res.status(400).json(
         new ApiResponse(
@@ -921,36 +978,24 @@ export const addOrder = asyncHandler(async (req, res) => {
             walletBalance: walletCreditUsed,
             shortfall: finalPayableAmount,
           },
-          "Insufficient wallet balance to pay full amount with wallet",
+          "Insufficient wallet balance",
         ),
       );
     }
 
-    // Get user wallet for transaction
     const wallet = await Wallet.findByUserId(customerId);
 
     if (!wallet) {
-      return res
-        .status(404)
-        .json(
-          new ApiResponse(
-            404,
-            null,
-            "Wallet not found. Please create a wallet first.",
-          ),
-        );
+      return res.status(404).json(
+        new ApiResponse(404, null, "Wallet not found"),
+      );
     }
 
     if (!wallet.isActive()) {
-      return res
-        .status(400)
-        .json(new ApiResponse(400, null, "Wallet is not active"));
+      return res.status(400).json(new ApiResponse(400, null, "Wallet inactive"));
     }
 
-    // Check wallet balance (double-check)
-    const currentBalance = await WalletTransaction.getCurrentBalance(
-      wallet._id,
-    );
+    const currentBalance = await WalletTransaction.getCurrentBalance(wallet._id);
     const amountInPaise = rupeeToPaise(totals.totalAmount);
 
     if (currentBalance < amountInPaise) {
@@ -967,27 +1012,20 @@ export const addOrder = asyncHandler(async (req, res) => {
       );
     }
 
-    // Start MongoDB transaction for atomic operation
-    // const session = await mongoose.startSession();
-    // session.startTransaction();
-
-    let stockUpdates;
-    let result;
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
     try {
-      // 1. Update stock (SKIPPED FOR DEBUG)
-      stockUpdates = await updateStock(processedVegetables, "deduct");
+      // 1. Update stock
+      await updateStock(processedVegetables, "deduct");
 
-      // 2. Generate order ID and create order
+      // 2. Create order
       const orderId = await generateUniqueOrderId();
-
-      // Count completed orders for cashback eligibility
       const completedOrderCount = await Order.countDocuments({
         customerInfo: customerId,
         orderStatus: { $in: ["placed", "processed", "shipped", "delivered"] },
       });
 
-      // Calculate cashback (will be 0 for WALLET payment as it's excluded)
       const orderForCashback = {
         finalPayableAmount: 0,
         totalAmount: totals.totalAmount,
@@ -1000,7 +1038,7 @@ export const addOrder = asyncHandler(async (req, res) => {
       );
       const cashbackEligible = cashbackAmount > 0;
 
-      result = await createOrderWithRetry({
+      const result = await createOrderWithRetry({
         orderId,
         orderType,
         customerInfo: customerId,
@@ -1009,51 +1047,48 @@ export const addOrder = asyncHandler(async (req, res) => {
         couponCode: validatedCode,
         couponId,
         ...totals,
-        walletCreditUsed,
-        finalPayableAmount: 0, // Full amount paid by wallet
+        walletCreditUsed: totals.totalAmount,
+        finalPayableAmount: 0,
         cashbackEligible,
         cashbackAmount,
         paymentMethod: "WALLET",
-        paymentStatus: "completed", // Wallet payment is instant
+        paymentStatus: "completed",
         orderStatus: "placed",
-        stockUpdates: [],
         deliveryAddressId,
         ...(orderType === "basket" && { selectedBasket: basketId }),
       });
 
-      // 3. Debit wallet (SKIPPED FOR DEBUG)
-
-      const referenceId = result.orderId;
-      const description = `Payment for order ${result.orderId}`;
-      const session = await mongoose.startSession();
-      session.startTransaction();
-
+      // 3. Debit wallet
       await WalletTransaction.createDebitTransaction(
         wallet._id,
         "order_payment",
-        referenceId,
+        result.orderId,
         amountInPaise,
-        description,
+        `Payment for order ${result.orderId}`,
         session,
       );
 
-      await session.commitTransaction();
-      session.endSession();
-
-      // 4. Increment coupon usage if applicable
+      // 4. Update coupon and user
       if (couponId) {
         await incrementCouponUsage(couponId, customerId);
       }
 
-      // 5. Update user's orders
       await User.findByIdAndUpdate(customerId, {
         $push: { orders: result.order._id },
       });
 
-      // Commit transaction
-      // await session.commitTransaction();
+      await session.commitTransaction();
+      session.endSession();
 
-      const populated = result.order; // Return simple order for test
+      const populated = await Order.findById(result.order._id)
+        .populate("customerInfo", "name email phone")
+        .populate("deliveryAddressId")
+        .populate({
+          path: "selectedBasket",
+          populate: { path: "vegetables.vegetable", select: "name" },
+        })
+        .populate("selectedVegetables.vegetable", "name")
+        .lean();
 
       return res.json(
         new ApiResponse(
@@ -1066,32 +1101,35 @@ export const addOrder = asyncHandler(async (req, res) => {
               newBalance: (currentBalance - amountInPaise) / 100,
             },
           },
-          "Order placed with wallet payment",
+          "Order placed with wallet",
         ),
       );
     } catch (error) {
-      console.error("Wallet Debug Error:", error);
+      await session.abortTransaction();
+      session.endSession();
+
+      try {
+        await updateStock(processedVegetables, "restore");
+      } catch (restoreErr) {}
+
       return res.status(500).json(new ApiResponse(500, null, error.message));
     }
   }
 
   // ================= ONLINE PAYMENT FLOW (RAZORPAY) =================
-
   const orderId = await generateUniqueOrderId();
   const razorpayOrder = await razorpay.orders.create({
-    amount: Math.round(finalPayableAmount * 100), // Charge only remaining amount after wallet credit
+    amount: Math.round(finalPayableAmount * 100),
     currency: "INR",
     receipt: orderId,
     payment_capture: 1,
   });
 
-  // Count completed orders for cashback eligibility
   const completedOrderCount = await Order.countDocuments({
     customerInfo: customerId,
     orderStatus: { $in: ["placed", "processed", "shipped", "delivered"] },
   });
 
-  // Calculate cashback for ONLINE payment
   const orderForCashback = {
     finalPayableAmount,
     totalAmount: totals.totalAmount,
@@ -1135,7 +1173,7 @@ export const addOrder = asyncHandler(async (req, res) => {
   );
 });
 
-// ================= FIXED: VERIFY PAYMENT CONTROLLER =================
+// ================= VERIFY PAYMENT CONTROLLER =================
 export const verifyPayment = asyncHandler(async (req, res) => {
   const {
     razorpay_order_id,
@@ -1144,56 +1182,38 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     customerInfo,
     selectedBasket,
     selectedVegetables,
-    orderId, // ✅ This comes from frontend
+    orderId,
     orderType,
     couponCode,
     deliveryAddressId,
   } = req.body;
 
-  // ============ VALIDATION ============
+  // Validation
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-    console.error("❌ Missing payment data");
-    return res
-      .status(400)
-      .json(new ApiResponse(400, null, "Missing payment data"));
+    return res.status(400).json(new ApiResponse(400, null, "Missing payment data"));
   }
   if (!customerInfo || !selectedVegetables || !orderId) {
-    console.error("❌ Missing order data:", {
-      hasCustomerInfo: !!customerInfo,
-      hasVegetables: !!selectedVegetables,
-      hasOrderId: !!orderId,
-    });
-    return res
-      .status(400)
-      .json(new ApiResponse(400, null, "Missing order data"));
+    return res.status(400).json(new ApiResponse(400, null, "Missing order data"));
   }
   if (orderType === "basket" && !selectedBasket) {
-    console.error("❌ Missing basket for basket order");
     return res.status(400).json(new ApiResponse(400, null, "Missing basket"));
   }
 
-  // ============ VERIFY SIGNATURE ============
+  // Verify signature
   const expectedSig = crypto
     .createHmac("sha256", process.env.RAZORPAY_SECRET)
     .update(`${razorpay_order_id}|${razorpay_payment_id}`)
     .digest("hex");
 
   if (expectedSig !== razorpay_signature) {
-    console.error("❌ Invalid signature");
-    return res
-      .status(400)
-      .json(new ApiResponse(400, null, "Invalid signature"));
+    return res.status(400).json(new ApiResponse(400, null, "Invalid signature"));
   }
-  // console.log("✅ Signature verified");
 
-  // ============ CHECK DUPLICATE PAYMENT ============
+  // Check duplicate
   if (await Order.exists({ razorpayPaymentId: razorpay_payment_id })) {
-    console.warn("⚠️ Payment already processed:", razorpay_payment_id);
     return res.status(400).json(new ApiResponse(400, null, "Order exists"));
   }
 
-  // ============ PROCESS ORDER DATA ============
-  // console.log("🔄 Processing order data...");
   const processed = await processOrderData(
     customerInfo,
     selectedBasket,
@@ -1202,20 +1222,16 @@ export const verifyPayment = asyncHandler(async (req, res) => {
   );
 
   if (processed.error) {
-    console.error("❌ Order data processing failed:", processed.error);
     return res.status(400).json(new ApiResponse(400, null, processed.error));
   }
 
   const { customerId, basketId, processedVegetables } = processed;
-  // console.log("✅ Order data processed");
 
-  // ============ CALCULATE SUBTOTAL ============
   let subtotal =
     orderType === "basket"
       ? (await Basket.findById(basketId, { price: 1 }).lean()).price
       : processedVegetables.reduce((sum, i) => sum + i.subtotal, 0);
 
-  // ============ VALIDATE COUPON ============
   let couponId = null,
     couponDiscount = 0,
     validatedCode = null;
@@ -1226,11 +1242,10 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       couponDiscount = v.couponDiscount;
       validatedCode = v.validatedCouponCode;
     } catch (err) {
-      // Coupon validation failed, continue without coupon
+      // Continue without coupon
     }
   }
 
-  // ============ CALCULATE TOTALS ============
   const totals = calculateOrderTotal(
     processedVegetables,
     orderType === "basket"
@@ -1240,7 +1255,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     couponDiscount,
   );
 
-  // ============ APPLY WALLET CREDIT (IF AVAILABLE) ============
   let walletCreditUsed = 0;
   let finalPayableAmount = totals.totalAmount;
 
@@ -1248,38 +1262,28 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     const wallet = await Wallet.findByUserId(customerId);
 
     if (wallet && wallet.isActive()) {
-      const walletBalance = await WalletTransaction.getCurrentBalance(
-        wallet._id,
-      );
+      const walletBalance = await WalletTransaction.getCurrentBalance(wallet._id);
       const walletBalanceInRupees = walletBalance / 100;
-
       walletCreditUsed = Math.min(walletBalanceInRupees, totals.totalAmount);
       finalPayableAmount = Math.max(0, totals.totalAmount - walletCreditUsed);
     }
   } catch (error) {
-    // Could not check wallet balance, continue without wallet credit
+    // Continue
   }
 
-  // ============ UPDATE STOCK ============
-  let stockUpdates;
-  try {
-    stockUpdates = await updateStock(processedVegetables, "deduct");
-  } catch (err) {
-    return res
-      .status(500)
-      .json(new ApiResponse(500, null, "Stock unavailable"));
-  }
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  // ============ CREATE ORDER ============
-  let result;
   try {
-    // Count completed orders for cashback eligibility
+    // 1. Update stock
+    await updateStock(processedVegetables, "deduct");
+
+    // 2. Create order
     const completedOrderCount = await Order.countDocuments({
       customerInfo: customerId,
       orderStatus: { $in: ["placed", "processed", "shipped", "delivered"] },
     });
 
-    // Calculate cashback for ONLINE payment
     const orderForCashback = {
       finalPayableAmount,
       totalAmount: totals.totalAmount,
@@ -1292,9 +1296,8 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     );
     const cashbackEligible = cashbackAmount > 0;
 
-    // ✅ Prepare complete order data
-    const orderData = {
-      orderId, // ✅ Use orderId from frontend (from Razorpay receipt)
+    const result = await createOrderWithRetry({
+      orderId,
       orderType,
       customerInfo: customerId,
       selectedVegetables: processedVegetables,
@@ -1311,133 +1314,107 @@ export const verifyPayment = asyncHandler(async (req, res) => {
       paymentStatus: "completed",
       razorpayOrderId: razorpay_order_id,
       razorpayPaymentId: razorpay_payment_id,
-      stockUpdates,
       deliveryAddressId,
       ...(orderType === "basket" && { selectedBasket: basketId }),
-    };
+    });
 
-    result = await createOrderWithRetry(orderData);
-  } catch (err) {
-    // Restore stock on failure
-    try {
-      await updateStock(processedVegetables, "restore");
-    } catch (restoreErr) {
-      // Failed to restore stock
-    }
-
-    return res.status(500).json(new ApiResponse(500, null, err.message));
-  }
-
-  // ============ DEBIT WALLET IF CREDIT WAS USED ============
-  if (walletCreditUsed > 0) {
-    try {
+    // 3. Debit wallet if needed
+    if (walletCreditUsed > 0) {
       const wallet = await Wallet.findByUserId(customerId);
       const amountInPaise = rupeeToPaise(walletCreditUsed);
-      const description = `Wallet credit applied to order ${result.orderId}`;
 
       await WalletTransaction.createDebitTransaction(
         wallet._id,
         "order_payment",
         result.orderId,
         amountInPaise,
-        description,
+        `Wallet credit applied to order ${result.orderId}`,
       );
-    } catch (walletError) {
-      // Wallet debit failed but order still created
     }
-  }
 
-  // ============ CREDIT CASHBACK IF ELIGIBLE ============
-  if (result.cashbackEligible && result.cashbackAmount > 0) {
-    creditCashbackToWallet(result.order).catch(() => {
-      // Cashback credit failed but order still created
-    });
-  }
-
-  // ============ POST-ORDER UPDATES ============
-  if (couponId) {
-    try {
+    // 4. Update coupon and user
+    if (couponId) {
       await incrementCouponUsage(couponId, customerId);
-    } catch (err) {
-      // Failed to increment coupon usage
     }
-  }
 
-  try {
     await User.findByIdAndUpdate(customerId, {
       $push: { orders: result.order._id },
     });
-    // console.log("✅ User orders updated");
+
+    await session.commitTransaction();
+    session.endSession();
+
+    // 5. Credit cashback (async)
+    if (cashbackEligible && cashbackAmount > 0) {
+      creditCashbackToWallet(result.order).catch(() => {});
+    }
+
+    // 6. Populate
+    const populated = await Order.findById(result.order._id)
+      .populate("customerInfo", "name email phone")
+      .populate("deliveryAddressId")
+      .populate({
+        path: "selectedBasket",
+        populate: { path: "vegetables.vegetable", select: "name" },
+      })
+      .populate("selectedVegetables.vegetable", "name")
+      .lean();
+
+    // 7. Send notifications (async)
+    processOrderInvoice(populated._id, {
+      sendEmail: true,
+      emailType: "invoice",
+    }).catch(() => {});
+    sendAdminOrderNotification(populated).catch(() => {});
+
+    res.json(new ApiResponse(200, populated, "Payment verified"));
   } catch (err) {
-    console.error("⚠️ Failed to update user orders:", err.message);
+    await session.abortTransaction();
+    session.endSession();
+
+    try {
+      await updateStock(processedVegetables, "restore");
+    } catch (restoreErr) {}
+
+    return res.status(500).json(new ApiResponse(500, null, err.message));
   }
-
-  // ============ POPULATE ORDER DETAILS ============
-  const populated = await Order.findById(result.order._id)
-    .populate("customerInfo", "name email phone")
-    .populate("deliveryAddressId")
-    .populate({
-      path: "selectedBasket",
-      populate: { path: "vegetables.vegetable", select: "name" },
-    })
-    .populate("selectedVegetables.vegetable", "name")
-    .lean();
-
-  // console.log("✅ Order populated");
-
-  // ============ SEND NOTIFICATIONS (ASYNC) ============
-  processOrderInvoice(populated._id, {
-    sendEmail: true,
-    emailType: "invoice",
-  }).catch((err) => {
-    console.error("⚠️ Invoice email failed:", err.message);
-  });
-
-  sendAdminOrderNotification(populated).catch((err) => {
-    console.error("⚠️ Admin notification failed:", err.message);
-  });
-
-  // console.log("🎉 Payment verification completed successfully");
-  res.json(new ApiResponse(200, populated, "Payment verified"));
 });
 
 export const updateOrderStatus = asyncHandler(async (req, res) => {
   const { _id } = req.params;
   const { orderStatus } = req.body;
 
-  if (!CONFIG.validStatuses.has(orderStatus)) {
-    return res
-      .status(400)
-      .json(
-        new ApiResponse(
-          400,
-          null,
-          `Invalid status. Use: ${[...CONFIG.validStatuses].join(", ")}`,
-        ),
-      );
+  // ✅ FIX: Sanitize input
+  const sanitizedStatus = sanitizeString(orderStatus);
+
+  if (!CONFIG.validStatuses.has(sanitizedStatus)) {
+    return res.status(400).json(
+      new ApiResponse(
+        400,
+        null,
+        `Invalid status. Use: ${[...CONFIG.validStatuses].join(", ")}`,
+      ),
+    );
   }
 
   const current = await Order.findById(_id, {
     orderStatus: 1,
     selectedVegetables: 1,
   }).lean();
+  
   if (!current)
     return res.status(404).json(new ApiResponse(404, null, "Order not found"));
 
-  if (orderStatus === "cancelled" && current.orderStatus !== "cancelled") {
+  if (sanitizedStatus === "cancelled" && current.orderStatus !== "cancelled") {
     try {
       await updateStock(current.selectedVegetables, "restore");
     } catch (err) {
-      console.error("Stock restore error:", err.message);
+      console.error("Stock restore error");
     }
   }
 
-  // Update paymentStatus to 'completed' only when orderStatus becomes 'delivered'
-  const updateFields = { orderStatus };
-  if (
-    typeof orderStatus === "string" &&
-    orderStatus.toLowerCase() === "delivered"
-  ) {
+  const updateFields = { orderStatus: sanitizedStatus };
+  if (sanitizedStatus.toLowerCase() === "delivered") {
     updateFields.paymentStatus = "completed";
   }
 
@@ -1463,7 +1440,7 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
           <h2 style="color: #0e540b;">Order Status Updated</h2>
           <p>Dear ${order.customerInfo.name || "Customer"},</p>
           <p>Your order <strong>#${order.orderId}</strong> status has been updated to:</p>
-          <h3 style="color: #e57512; text-transform: uppercase; margin: 20px 0;">${orderStatus}</h3>
+          <h3 style="color: #e57512; text-transform: uppercase; margin: 20px 0;">${sanitizedStatus}</h3>
           <p>Track your order or view details in your account.</p>
           <p>Thank you for shopping with VegBazar!</p>
         </div>
@@ -1477,12 +1454,7 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
       customSubject: `Order Status Update - #${order.orderId}`,
       customMessage: message,
       emailType: "statusUpdate",
-    }).catch((err) =>
-      console.error(
-        `Failed to send status email for order ${order.orderId}:`,
-        err.message,
-      ),
-    );
+    }).catch(() => {});
   }
 
   res.json(new ApiResponse(200, order, "Order status updated"));
@@ -1490,13 +1462,9 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
 
 export const getRazorpayKey = asyncHandler(async (req, res) => {
   if (!process.env.RAZORPAY_KEY_ID) {
-    return res
-      .status(500)
-      .json(new ApiResponse(500, null, "Razorpay key not configured"));
+    return res.status(500).json(new ApiResponse(500, null, "Key not configured"));
   }
-  res.json(
-    new ApiResponse(200, { key: process.env.RAZORPAY_KEY_ID }, "Key fetched"),
-  );
+  res.json(new ApiResponse(200, { key: process.env.RAZORPAY_KEY_ID }, "Key fetched"));
 });
 
 export const calculatePrice = asyncHandler(async (req, res) => {
@@ -1504,22 +1472,26 @@ export const calculatePrice = asyncHandler(async (req, res) => {
   if (!items || !Array.isArray(items) || !items.length)
     throw new ApiError(400, "Items required");
 
+  // ✅ FIX: Validate item count
+  if (items.length > CONFIG.maxItemsPerOrder) {
+    throw new ApiError(400, `Maximum ${CONFIG.maxItemsPerOrder} items allowed`);
+  }
+
   let subtotal = 0;
   const calculatedItems = [];
 
   for (const item of items) {
-    if (
-      !item.vegetableId ||
-      !item.weight ||
-      !item.quantity ||
-      item.quantity < 1
-    ) {
+    if (!item.vegetableId || !item.weight || !item.quantity || item.quantity < 1) {
       throw new ApiError(400, "Invalid item");
     }
 
+    // ✅ FIX: Validate quantity
+    if (item.quantity > CONFIG.maxQuantity) {
+      throw new ApiError(400, `Maximum quantity is ${CONFIG.maxQuantity}`);
+    }
+
     const veg = await Vegetable.findById(item.vegetableId).lean();
-    if (!veg)
-      throw new ApiError(404, `Vegetable not found: ${item.vegetableId}`);
+    if (!veg) throw new ApiError(404, `Vegetable not found: ${item.vegetableId}`);
 
     try {
       const priceInfo = getPrice(veg, item.weight, item.quantity);
@@ -1590,8 +1562,8 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
   const { basketId, basketPrice, couponCode } = req.body;
 
   if (!basketId || !basketPrice)
-    throw new ApiError(400, "Basket ID and price are required");
-  if (!couponCode) throw new ApiError(400, "Coupon code is required");
+    throw new ApiError(400, "Basket ID and price required");
+  if (!couponCode) throw new ApiError(400, "Coupon code required");
 
   const [basket, coupon] = await Promise.all([
     Basket.findById(basketId).select("price").lean(),
@@ -1666,11 +1638,11 @@ export const validateCouponForBasket = asyncHandler(async (req, res) => {
   );
 });
 
-// ================= ADVANCED ANALYTICS WITH HASHMAP AGGREGATION =================
+// ================= ANALYTICS =================
 export const getOrdersByDateTimeRange = asyncHandler(async (req, res) => {
   const { startDate, startTime, endDate, endTime } = req.query;
   if (!startDate || !startTime || !endDate || !endTime) {
-    throw new ApiError(400, "All date-time parameters are required");
+    throw new ApiError(400, "All date-time parameters required");
   }
 
   const startDateTime = new Date(`${startDate}T${startTime}:00`);
@@ -1685,7 +1657,7 @@ export const getOrdersByDateTimeRange = asyncHandler(async (req, res) => {
 
   const orders = await Order.find({
     orderDate: { $gte: startDateTime, $lte: endDateTime },
-    orderStatus: { $nin: ["delivered", "cancelled", "Delivered", "Cancelled"] },
+    orderStatus: { $nin: ["delivered", "cancelled"] },
   })
     .populate("customerInfo", "name")
     .populate("selectedVegetables.vegetable", "name")
@@ -1716,9 +1688,6 @@ export const getOrdersByDateTimeRange = asyncHandler(async (req, res) => {
   let totalRevenue = 0;
 
   for (const order of orders) {
-    const status = (order.orderStatus || "").toLowerCase();
-    if (status === "cancelled" || status === "delivered") continue;
-
     totalRevenue += order.totalAmount || 0;
 
     for (const item of order.selectedVegetables) {
@@ -1861,10 +1830,13 @@ export const getOrdersByStatus = asyncHandler(async (req, res) => {
   const { status, startDate, endDate } = req.query;
 
   if (!status) {
-    throw new ApiError(400, "Status parameter is required");
+    throw new ApiError(400, "Status parameter required");
   }
 
-  const query = { orderStatus: new RegExp(`^${status}$`, "i") };
+  // ✅ FIX: Sanitize status to prevent NoSQL injection
+  const sanitizedStatus = sanitizeString(status);
+
+  const query = { orderStatus: new RegExp(`^${sanitizedStatus}$`, "i") };
 
   if (startDate || endDate) {
     query.orderDate = {};
@@ -1894,7 +1866,7 @@ export const getOrdersByStatus = asyncHandler(async (req, res) => {
           summary: { totalOrders: 0, totalRevenue: 0 },
           vegetableData: {},
         },
-        `No orders found with status: ${status}`,
+        `No orders found with status: ${sanitizedStatus}`,
       ),
     );
   }
@@ -1948,7 +1920,7 @@ export const getOrdersByStatus = asyncHandler(async (req, res) => {
     totalVegetablesWeightKg: Math.round(totalWeightKg * 100) / 100,
     totalVegetablesPieces: totalPieces,
     uniqueVegetables: Object.keys(vegData).length,
-    status,
+    status: sanitizedStatus,
     ...(startDate && { dateFrom: startDate }),
     ...(endDate && { dateTo: endDate }),
   };
@@ -1957,7 +1929,7 @@ export const getOrdersByStatus = asyncHandler(async (req, res) => {
     new ApiResponse(
       200,
       { summary, vegetableData: vegData, orders },
-      `Orders with status '${status}' retrieved successfully`,
+      `Orders with status '${sanitizedStatus}' retrieved`,
     ),
   );
 });
@@ -1965,11 +1937,13 @@ export const getOrdersByStatus = asyncHandler(async (req, res) => {
 export const getOrdersByMultipleStatuses = asyncHandler(async (req, res) => {
   const { statuses, startDate, endDate } = req.query;
 
-  if (!statuses) throw new ApiError(400, "Statuses parameter is required");
+  if (!statuses) throw new ApiError(400, "Statuses parameter required");
 
+  // ✅ FIX: Sanitize each status
   const statusSet = new Set(
-    statuses.split(",").map((s) => s.trim().toLowerCase()),
+    statuses.split(",").map((s) => sanitizeString(s.trim().toLowerCase())),
   );
+  
   const query = {
     orderStatus: {
       $in: Array.from(statusSet).map((s) => new RegExp(`^${s}$`, "i")),
