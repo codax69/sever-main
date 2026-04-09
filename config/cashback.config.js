@@ -8,7 +8,7 @@ export const CASHBACK_CONFIG = {
   enabled: true,
 
   // Minimum order amount to qualify for cashback (in rupees)
-  minOrderAmount: 200,
+  minOrderAmount: 350,
 
   // Minimum completed orders required before cashback eligibility
   // Users will be randomly assigned a threshold between 2-4 orders
@@ -16,9 +16,21 @@ export const CASHBACK_CONFIG = {
 
   // Tiered cashback percentages based on order amount
   tiers: [
-    { minAmount: 200, maxAmount: 500, percentage: 1.2 },
-    { minAmount: 500, maxAmount: 1000, percentage: 1.5 },
-    { minAmount: 1000, maxAmount: Infinity, percentage: 1.7 },
+    {
+      minAmount: 350,
+      maxAmount: 500,
+      percentage: Number(Math.random() * (1.2 - 0.5) + 0.5).toFixed(2),
+    },
+    {
+      minAmount: 501,
+      maxAmount: 1000,
+      percentage: Number(Math.random() * (1.5 - 0.5) + 0.5).toFixed(2),
+    },
+    {
+      minAmount: 1001,
+      maxAmount: Infinity,
+      percentage: Number(Math.random() * (1.7 - 0.5) + 0.5).toFixed(2),
+    },
   ],
 
   // Minimum and maximum cashback amount per order (in rupees)

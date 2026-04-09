@@ -864,7 +864,7 @@ export const sendInvoiceEmail = async (order, pdfPath, options = {}) => {
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
       <div style="background-color: #0e540b; color: white; padding: 20px; text-align: center;">
         <h1>VegBazar</h1>
-        <p>Fresh Vegetables & Grocery Store</p>
+        <p>Fresh Vegetables</p>
       </div>
       <div style="padding: 30px; background-color: #f8f9fa;">
         <h2 style="color: #0e540b;">Your Order Invoice</h2>
@@ -881,8 +881,8 @@ export const sendInvoiceEmail = async (order, pdfPath, options = {}) => {
         <p>Best regards,<br>The VegBazar Team</p>
       </div>
       <div style="background-color: #0e540b; color: white; padding: 20px; text-align: center; font-size: 12px;">
-        <p>Phone: 9265318453 | Email: info.vegbazar@gmail.com</p>
-        <p>Gujarat 380001</p>
+        <p>Phone:  +91 8780564114 | Email: info.vegbazar@gmail.com</p>
+        <p>Gujarat 380001</p> 
       </div>
     </div>
   `;

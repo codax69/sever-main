@@ -1,4 +1,4 @@
-import { Router } from "express";
+import express from "express";
 import {
   getCart,
   addToCart,
@@ -9,83 +9,28 @@ import {
   removeCoupon,
   getCartRecommendations,
   getCartAnalytics,
-  mergeGuestCart,
+  mergeGuestCart, // ← was missing
 } from "../controller/cart.js";
+import { verifyJWT } from "../middleware/auth.js"; 
+const router = express.Router();
 
-import { verifyJWT } from "../middleware/auth.js";
+// All cart routes require authentication
+router.use(verifyJWT);
 
-const router = Router();
+// ── Core cart ─────────────────────────────────────────────
+router.get("/", getCart);
+router.post("/add", addToCart);
+router.put("/update", updateCartItem);
+router.delete("/remove", removeFromCart);
+router.delete("/clear", clearCart);
 
-router.get(
-  "/",
-  verifyJWT,
-  getCart
-);
+// ── Coupon ────────────────────────────────────────────────
+router.post("/coupon/apply", applyCoupon);
+router.delete("/coupon", removeCoupon);
 
-router.post(
-  "/items",
-  verifyJWT,
-  addToCart
-);
-
-// Update cart item
-router.put(
-  "/items",
-  verifyJWT,
-  updateCartItem
-);
-
-// Remove item from cart
-router.delete(
-  "/items",
-  verifyJWT,
-  removeFromCart
-);
-
-// Clear cart
-router.delete(
-  "/",
-  verifyJWT,
-  clearCart
-);
-
-/* ================= CART COUPON OPERATIONS ================= */
-
-// Apply coupon
-router.post(
-  "/coupon",
-  verifyJWT,
-  applyCoupon
-);
-
-// Remove coupon
-router.delete(
-  "/coupon",
-  verifyJWT,
-  removeCoupon
-);
-
-/* ================= ADVANCED CART FEATURES ================= */
-
-// Product recommendations
-router.get(
-  "/recommendations",
-  verifyJWT,
-  getCartRecommendations
-);
-
-// Cart analytics (user-level, not admin)
-router.get(
-  "/analytics",
-  verifyJWT,
-  getCartAnalytics
-);
-
-// Merge guest cart into user cart after login
-router.post(
-  "/merge-guest",
-  verifyJWT,
-  mergeGuestCart
-);
+// ── Extras ────────────────────────────────────────────────
+router.get("/recommendations", getCartRecommendations);
+router.get("/analytics", getCartAnalytics);
+router.post("/merge", mergeGuestCart); // ← was 404
 
 export default router;

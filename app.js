@@ -2,6 +2,11 @@ import "dotenv/config";
 import express, { json, urlencoded } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import {
+  generalLimiter,
+  sensitiveLimiter,
+  majorLimiter,
+} from "./src/middleware/rateLimiter.js";
 
 const allowedOrigins = [
   "https://admin.vegbazar.cloud",
@@ -39,11 +44,11 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ================= ROUTES ================= */
+
 // Public / utility routes
 import otpRoutes from "./src/routes/otp.js";
 
-app.use("/api/otp", otpRoutes);
+app.use("/api/otp", sensitiveLimiter, otpRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -71,21 +76,27 @@ import reportRoutes from "./src/routes/report.routes.js";
 import basketRoutes from "./src/routes/basket.js";
 import walletRoutes from "./src/routes/wallet.routes.js";
 
-app.use("/api/report", reportRoutes);
+
+// Sensitive
+app.use("/api/otp", otpRoutes);
 app.use("/api/auth", authRoutes);
-app.use("/api/export", exportRoutes);
-app.use("/api/cities", cityRoutes);
+
 app.use("/api/vegetables", vegetableRoutes);
 app.use("/api/orders", orderRoutes);
+app.use("/api/cart",  cartRoutes);
+app.use("/api/wallet", walletRoutes);
+app.use("/api/coupons", couponRoutes);
+
+// Normal (read-heavy / low-risk)
+app.use("/api/cities", cityRoutes);
 app.use("/api/testimonials", testimonialRoutes);
 app.use("/api/invoice", invoiceRoutes);
-app.use("/api/coupons", couponRoutes);
 app.use("/api/user", userRoutes);
-app.use("/api/addresses", addressRoutes);
-app.use("/api/cart", cartRoutes);
+app.use("/api/addresses", addressRoutes); 
 app.use("/api/reports", orderReportsRoutes);
+app.use("/api/report", reportRoutes);
+app.use("/api/export", exportRoutes);
 app.use("/api/baskets", basketRoutes);
-app.use("/api/wallet", walletRoutes);
 
 /* ================= GLOBAL ERROR HANDLER ================= */
 app.use((err, req, res, next) => {

@@ -336,7 +336,7 @@ export const deleteCoupon = asyncHandler(async (req, res) => {
 });
 
 // Increment coupon usage (called after successful order)
-export const incrementCouponUsage = async (couponId, customerId) => {
+export const incrementCouponUsage = async (couponId, customerId, session = null) => {
   const updateData = {
     $inc: { usedCount: 1 },
   };
@@ -345,5 +345,5 @@ export const incrementCouponUsage = async (couponId, customerId) => {
     updateData.$push = { usedBy: customerId };
   }
 
-  await Coupon.findByIdAndUpdate(couponId, updateData);
+  await Coupon.findByIdAndUpdate(couponId, updateData, session ? { session } : {});
 };

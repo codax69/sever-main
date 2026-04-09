@@ -2,7 +2,6 @@ import mongoose from "mongoose";
 
 const orderSchema = new mongoose.Schema(
   {
-    // Order Type identifier
     orderType: {
       type: String,
       enum: ["basket", "custom"],
@@ -16,11 +15,10 @@ const orderSchema = new mongoose.Schema(
       required: true,
     },
 
-    // ✅ FIX 1: Make deliveryAddressId optional
     deliveryAddressId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Address",
-      required: false,  // ✅ Changed from true
+      required: false,
       default: null,
     },
 
@@ -70,7 +68,6 @@ const orderSchema = new mongoose.Schema(
           type: Boolean,
           default: false,
         },
-        // Fields for set-based pricing
         setIndex: {
           type: Number,
           min: 0,
@@ -107,7 +104,6 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // ===== COUPON FIELDS =====
     couponCode: {
       type: String,
       uppercase: true,
@@ -152,24 +148,21 @@ const orderSchema = new mongoose.Schema(
       min: 0,
     },
 
-    // ===== WALLET CREDIT FIELDS =====
     walletCreditUsed: {
       type: Number,
       min: 0,
       default: 0,
     },
 
-    // ✅ FIX 2: Make finalPayableAmount required with proper default
     finalPayableAmount: {
       type: Number,
-      required: true,  // ✅ Make it required
+      required: true,
       min: 0,
-      default: function() {
-        return this.totalAmount || 0;  // ✅ Default to totalAmount
+      default: function () {
+        return this.totalAmount || 0;
       },
     },
 
-    // ===== CASHBACK FIELDS =====
     cashbackEligible: {
       type: Boolean,
       default: false,
@@ -219,7 +212,7 @@ const orderSchema = new mongoose.Schema(
     DeliveryTimeSlot: {
       type: String,
       enum: ["8AM-10AM", "4PM-6PM"],
-      default: null,  // ✅ Add default
+      default: null,
     },
 
     specialInstructions: {
@@ -236,12 +229,6 @@ const orderSchema = new mongoose.Schema(
     razorpayPaymentId: {
       type: String,
       default: null,
-    },
-
-    // ✅ FIX 3: Define stockUpdates properly (or remove if not needed)
-    stockUpdates: {
-      type: [mongoose.Schema.Types.Mixed],  // ✅ Better type definition
-      default: [],
     },
   },
   {
@@ -273,13 +260,11 @@ orderSchema.virtual("totalSavings").get(function () {
   return savings;
 });
 
-// ✅ FIX 4: Improved pre-save validation with better error handling
+// ===== PRE-SAVE VALIDATION =====
 orderSchema.pre("save", function (next) {
   try {
-    // Helper function for floating-point comparison
     const areEqual = (a, b, tolerance = 0.02) => Math.abs(a - b) <= tolerance;
 
-    // Validate vegetables total
     const calculatedVegTotal = this.selectedVegetables.reduce(
       (sum, item) => sum + (item.subtotal || 0),
       0,
@@ -287,7 +272,9 @@ orderSchema.pre("save", function (next) {
 
     if (this.orderType === "custom") {
       if (!areEqual(this.vegetablesTotal, calculatedVegTotal)) {
-        console.error(`❌ Vegetables total mismatch: Expected ${calculatedVegTotal.toFixed(2)}, got ${this.vegetablesTotal.toFixed(2)}`);
+        console.error(
+          `❌ Vegetables total mismatch: Expected ${calculatedVegTotal.toFixed(2)}, got ${this.vegetablesTotal.toFixed(2)}`,
+        );
         return next(
           new Error(
             `Vegetables total mismatch. Expected ${calculatedVegTotal.toFixed(2)}, got ${this.vegetablesTotal.toFixed(2)}`,
@@ -296,21 +283,24 @@ orderSchema.pre("save", function (next) {
       }
     }
 
-    // Validate coupon discount
     if (this.couponDiscount < 0) {
       return next(new Error("Coupon discount cannot be negative"));
     }
 
-    // Validate subtotalAfterDiscount calculation
     let expectedSubtotal;
     if (this.orderType === "basket") {
       expectedSubtotal = Math.max(0, this.basketPrice - this.couponDiscount);
     } else {
-      expectedSubtotal = Math.max(0, this.vegetablesTotal - this.couponDiscount);
+      expectedSubtotal = Math.max(
+        0,
+        this.vegetablesTotal - this.couponDiscount,
+      );
     }
 
     if (!areEqual(this.subtotalAfterDiscount, expectedSubtotal)) {
-      console.error(`❌ Subtotal mismatch: Expected ${expectedSubtotal.toFixed(2)}, got ${this.subtotalAfterDiscount.toFixed(2)}`);
+      console.error(
+        `❌ Subtotal mismatch: Expected ${expectedSubtotal.toFixed(2)}, got ${this.subtotalAfterDiscount.toFixed(2)}`,
+      );
       return next(
         new Error(
           `Subtotal after discount mismatch. Expected ${expectedSubtotal.toFixed(2)}, got ${this.subtotalAfterDiscount.toFixed(2)}`,
@@ -318,11 +308,11 @@ orderSchema.pre("save", function (next) {
       );
     }
 
-    // Validate total amount: subtotalAfterDiscount + deliveryCharges
     const calculatedTotal = this.subtotalAfterDiscount + this.deliveryCharges;
-
     if (!areEqual(this.totalAmount, calculatedTotal)) {
-      console.error(`❌ Total amount mismatch: Expected ${calculatedTotal.toFixed(2)}, got ${this.totalAmount.toFixed(2)}`);
+      console.error(
+        `❌ Total amount mismatch: Expected ${calculatedTotal.toFixed(2)}, got ${this.totalAmount.toFixed(2)}`,
+      );
       return next(
         new Error(
           `Total amount mismatch. Expected ${calculatedTotal.toFixed(2)}, got ${this.totalAmount.toFixed(2)}`,
@@ -330,9 +320,14 @@ orderSchema.pre("save", function (next) {
       );
     }
 
-    // ✅ NEW: Validate finalPayableAmount
-    if (this.finalPayableAmount === undefined || this.finalPayableAmount === null) {
-      this.finalPayableAmount = Math.max(0, this.totalAmount - (this.walletCreditUsed || 0));
+    if (
+      this.finalPayableAmount === undefined ||
+      this.finalPayableAmount === null
+    ) {
+      this.finalPayableAmount = Math.max(
+        0,
+        this.totalAmount - (this.walletCreditUsed || 0),
+      );
     }
 
     next();
@@ -343,13 +338,23 @@ orderSchema.pre("save", function (next) {
 });
 
 // ===== INDEXES =====
-orderSchema.index({ customerInfo: 1, createdAt: -1 });
-orderSchema.index({ orderStatus: 1, createdAt: -1 });
-orderSchema.index({ orderType: 1, orderStatus: 1 });
+// ✅ FIX: was "OrderSchema" (wrong casing) — now all use "orderSchema"
+// ✅ Removed duplicates, kept only the most useful compound + single-field indexes
+
+// Compound indexes (cover the most common query patterns)
+orderSchema.index({ customerInfo: 1, orderStatus: 1 }); // dashboard: user's active orders
+orderSchema.index({ orderDate: 1, orderStatus: 1 }); // analytics date-range queries
+orderSchema.index({ orderStatus: 1, createdAt: -1 }); // admin: filter by status, sorted
+orderSchema.index({ orderType: 1, orderStatus: 1 }); // basket vs custom filter
+
+// Single-field indexes
 orderSchema.index({ paymentStatus: 1 });
 orderSchema.index({ couponCode: 1 });
-orderSchema.index({ orderDate: 1 });
-orderSchema.index({ createdAt: -1 });
+orderSchema.index({ createdAt: -1 }); // default sort for order lists
+
+// orderId already has unique: true above — Mongoose creates the unique index automatically.
+// razorpayPaymentId: sparse unique index to prevent duplicate payment processing
+orderSchema.index({ razorpayPaymentId: 1 }, { unique: true, sparse: true });
 
 const Order = mongoose.model("Order", orderSchema);
 export default Order;

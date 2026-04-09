@@ -20,11 +20,10 @@ const cartItemSchema = new mongoose.Schema({
   weight: {
     type: String,
     required: true,
-    enum: ["1kg", "500g", "250g", "100g"],
   },
   selectedWeight: {
     type: Number, // in grams
-    required: true,
+    default: 0,
   },
   totalPrice: {
     type: Number,

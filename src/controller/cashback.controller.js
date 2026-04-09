@@ -34,10 +34,16 @@ export const getCashbackSummary = asyncHandler(async (req, res) => {
   );
 
   // Get count of orders with cashback
+  // ✅ BUG-C2 Fix: field is `customerInfo` not `customerId` in Order schema
   const ordersWithCashback = await Order.countDocuments({
-    customerId: userId,
+    customerInfo: userId,
     cashbackCredited: true,
   });
+
+  // ✅ BUG-M1 Fix: sort so lastCashbackDate reflects the truly newest transaction
+  const sortedTransactions = [...cashbackTransactions].sort(
+    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+  );
 
   res.status(200).json(
     new ApiResponse(
@@ -47,8 +53,8 @@ export const getCashbackSummary = asyncHandler(async (req, res) => {
         totalCashbackTransactions: cashbackTransactions.length,
         ordersWithCashback,
         lastCashbackDate:
-          cashbackTransactions.length > 0
-            ? cashbackTransactions[cashbackTransactions.length - 1].createdAt
+          sortedTransactions.length > 0
+            ? sortedTransactions[0].createdAt
             : null,
       },
       "Cashback summary fetched successfully",
@@ -91,37 +97,42 @@ export const getCashbackHistory = asyncHandler(async (req, res) => {
     }),
   ]);
 
-  // Format transactions with order details
-  const formattedTransactions = await Promise.all(
-    transactions.map(async (txn) => {
-      // Extract order ID from reference ID (format: CASH_ORDER123)
-      const orderId = txn.referenceId?.replace("CASH_", "");
-      let orderDetails = null;
+  // ✅ BUG-C4 Fix: Replaced N+1 sequential Order.findOne calls with a single batch query
+  // Extract all order IDs from reference IDs (format: CASH_{orderId})
+  const orderIdList = transactions
+    .map((txn) => txn.referenceId?.replace("CASH_", ""))
+    .filter(Boolean);
 
-      if (orderId) {
-        const order = await Order.findOne({ orderId }).select(
-          "orderId totalAmount finalPayableAmount createdAt",
-        );
-        if (order) {
-          orderDetails = {
+  // Single DB call to get all orders at once
+  const ordersMap = new Map();
+  if (orderIdList.length > 0) {
+    const ordersFound = await Order.find(
+      { orderId: { $in: orderIdList } },
+      "orderId totalAmount finalPayableAmount createdAt"
+    ).lean();
+    ordersFound.forEach((o) => ordersMap.set(o.orderId, o));
+  }
+
+  const formattedTransactions = transactions.map((txn) => {
+    const orderId = txn.referenceId?.replace("CASH_", "");
+    const order = orderId ? ordersMap.get(orderId) : null;
+
+    return {
+      id: txn._id,
+      amount: paiseToRupee(txn.amount),
+      description: txn.description,
+      referenceId: txn.referenceId,
+      createdAt: txn.createdAt,
+      orderDetails: order
+        ? {
             orderId: order.orderId,
             orderAmount: order.totalAmount,
             finalAmount: order.finalPayableAmount,
             orderDate: order.createdAt,
-          };
-        }
-      }
-
-      return {
-        id: txn._id,
-        amount: paiseToRupee(txn.amount),
-        description: txn.description,
-        referenceId: txn.referenceId,
-        createdAt: txn.createdAt,
-        orderDetails,
-      };
-    }),
-  );
+          }
+        : null,
+    };
+  });
 
   res.status(200).json(
     new ApiResponse(
@@ -150,9 +161,10 @@ export const getOrderCashback = asyncHandler(async (req, res) => {
   const { orderId } = req.params;
 
   // Find the order
+  // ✅ BUG-C2 Fix: field is `customerInfo` not `customerId` in Order schema
   const order = await Order.findOne({
     orderId,
-    customerId: userId,
+    customerInfo: userId,
   }).select(
     "orderId totalAmount finalPayableAmount cashbackEligible cashbackAmount cashbackCredited cashbackCreditedAt paymentMethod createdAt",
   );
