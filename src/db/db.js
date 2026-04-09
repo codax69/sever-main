@@ -9,7 +9,7 @@ dns.setDefaultResultOrder("ipv4first");
 export const ConnectDB = async () => {
   try {
     const connectionDB = await mongoose.connect(
-      `${process.env.DB_URI}/${"VegBazarDEV"}`,
+      `${process.env.DB_URI}/${"VegBazarDB"}`,
       { family: 4 },
     );
     console.log("DB HOSTED ON:", connectionDB.connection.host);
