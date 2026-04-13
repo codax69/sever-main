@@ -956,8 +956,8 @@ export const calculateTodayOrderTotal = asyncHandler(async (req, res) => {
 
 // GET /api/orders  (admin, paginated)
 export const getOrders = asyncHandler(async (req, res) => {
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+  const page = Math.max(1, parseInt(req.query.page));
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit)));
   const skip = (page - 1) * limit;
 
   const filter = {};
